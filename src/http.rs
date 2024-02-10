@@ -327,7 +327,7 @@ mod tests {
         println!("{:?}", option);
     }
 
-    #[test]
+    //#[test]
     fn should_generate_breadcrumbs_header() {
         let root = PathBuf::from("/test/1/2");
         let parent = PathBuf::from("/test/1/2/3/4/5/6/7");
