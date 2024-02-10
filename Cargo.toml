@@ -1,7 +1,17 @@
 [package]
 name = "httprs"
+description = "A fast simple command line http server tool"
 version = "0.1.0"
 edition = "2021"
+authors = ["10fish <jokefish@live.com>"]
+license = "MIT"
+license-file = "LICENSE"
+repository = "https://github.com/10fish/httprs"
+rust-version = "1.56"
+documentation = "https://docs.rs/httprs"
+readme = "README.md"
+keywords = ["http", "server"]
+include = ["/src", "Cargo.toml", "COPYRIGHT", "LICENSE", "README.md"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -27,3 +37,6 @@ regex = "1"
 [[bin]]
 name = "httprs"
 path = "src/main.rs"
+
+[badges]
+maintenance = { status = "experimental" }
