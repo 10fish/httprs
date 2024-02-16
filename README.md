@@ -6,7 +6,7 @@
 [![Dependency status](https://deps.rs/repo/github/10fish/httprs/status.svg)](https://deps.rs/repo/github/10fish/httprs)
 [![Crates.io](https://img.shields.io/crates/v/httprs)](https://crates.io/crates/httprs)
 [![docs.rs](https://img.shields.io/badge/docs-website-blue)](https://docs.rs/httprs/)
-[![Lines of code](https://tokei.rs/b1/github/10fish/httprs?category=lines)](https://github.com/10fish/httprs).
+[![Lines of code](https://tokei.rs/b1/github/10fish/httprs?category=lines)](https://github.com/10fish/httprs)
 
 A fast simple command line http server tool. 
 

@@ -1,16 +1,16 @@
-name: audit
+name: Audit
 
 # This being a separate file, so there can be an own badge in README file
 # and therefore spread awareness of cargo audit a tiny bit.
 
 on:
   push:
-    branches: [ master ]
+    branches: [ main ]
   pull_request:
-    branches: [ master ]
+    branches: [ main ]
   schedule:
-    # Runs at 15:00 UTC on Fri
-    - cron: "0 5 * * 10"
+    # Runs at 05:00 UTC on Thu
+    - cron: "0 5 * * 4"
   workflow_dispatch:
   # This allows running it on any branch manually:
   # https://docs.github.com/en/actions/managing-workflow-runs/manually-running-a-workflow
