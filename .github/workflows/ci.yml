@@ -1,13 +1,15 @@
-name: Rust
+name: CI
 
 on:
   push:
-    branches: [ "main" ]
   pull_request:
-    branches: [ "main" ]
+  workflow_dispatch:
+  # This allows running it on any branch manually:
+  # https://docs.github.com/en/actions/managing-workflow-runs/manually-running-a-workflow
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: --deny warnings
 
 jobs:
   build:

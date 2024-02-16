@@ -1,0 +1,31 @@
+name: audit
+
+# This being a separate file, so there can be an own badge in README file
+# and therefore spread awareness of cargo audit a tiny bit.
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  schedule:
+    # Runs at 15:00 UTC on Fri
+    - cron: "0 5 * * 10"
+  workflow_dispatch:
+  # This allows running it on any branch manually:
+  # https://docs.github.com/en/actions/managing-workflow-runs/manually-running-a-workflow
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/install@v0.1
+        with:
+          crate: cargo-audit
+          version: latest
+      - run: cargo audit --version
+      - run: cargo audit
