@@ -114,7 +114,7 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
                 .replace("{{title}}", format!("File list on {}", html_title).as_str())
                 .replace("{{body}}", html_body.as_str());
 
-            log_request(&request, timer.elapsed().unwrap().as_micros());
+            log_request(&request, timer.elapsed().unwrap().as_micros(), StatusCode::OK);
             Ok(Response::builder()
                 .header(header::SERVER, HEADER_SERVER_VALUE)
                 .status(StatusCode::OK)
@@ -173,7 +173,7 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
                 let body = BodyExt::map_err(
                     StreamBody::new(body_stream.map_ok(Frame::data)), infallible).boxed();
 
-                log_request(&request, timer.elapsed().unwrap().as_micros());
+                log_request(&request, timer.elapsed().unwrap().as_micros(), StatusCode::OK);
                 Ok(Response::builder()
                     .header(header::SERVER, HEADER_SERVER_VALUE)
                     .header(header::CONTENT_TYPE, HeaderValue::from_static(content_type))
@@ -185,7 +185,7 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
                 let body = BodyExt::map_err(
                     StreamBody::new(body_stream.map_ok(Frame::data)), infallible).boxed();
 
-                log_request(&request, timer.elapsed().unwrap().as_micros());
+                log_request(&request, timer.elapsed().unwrap().as_micros(), StatusCode::OK);
                 Ok(Response::builder()
                     .header(header::SERVER, HEADER_SERVER_VALUE)
                     .header(header::CONTENT_TYPE, HeaderValue::from_static(content_type))
@@ -200,7 +200,7 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
             .replace("{{title}}", format!("{}", "file not found").as_str())
             .replace("{{body}}", format!("file not found: {}", path).as_str());
 
-        log_request(&request, timer.elapsed().unwrap().as_micros());
+        log_request(&request, timer.elapsed().unwrap().as_micros(), StatusCode::NOT_FOUND);
         Ok(Response::builder()
             .header(header::SERVER, HEADER_SERVER_VALUE)
             .status(StatusCode::NOT_FOUND)
@@ -209,10 +209,14 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
 }
 
 #[inline]
-fn log_request(request: &Request<Incoming>, time: u128) {
+fn log_request(request: &Request<Incoming>, time: u128, status_code: StatusCode) {
+    let status = match status_code {
+        success if success.lt(&StatusCode::BAD_REQUEST) => success.to_string().green(),
+        fail if fail.ge(&StatusCode::BAD_REQUEST) => fail.to_string().red(),
+        other_status => other_status.to_string().magenta(),
+    };
     debug!("{} {} {:?} {}µs {} {:?}", request.method().to_string().blue(), request.uri(),
-        request.version(),time, StatusCode::OK.to_string().green(),
-        request.headers().get(header::USER_AGENT).unwrap());
+        request.version(),time, status,request.headers().get(header::USER_AGENT).unwrap());
 }
 
 
