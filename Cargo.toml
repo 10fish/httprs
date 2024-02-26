@@ -35,7 +35,7 @@ regex = "^1.6"
 
 [[bin]]
 name = "httprs"
-path = "src/main.rs"
+path = "src/bin/serve.rs"
 
 [badges]
 maintenance = { status = "experimental" }

@@ -2,13 +2,11 @@ use std::{
     env,
     convert::Infallible,
     ffi::OsString,
-    io::SeekFrom,
     path::{Path, PathBuf},
 };
-use std::cmp::Ordering;
-use std::ops::Index;
-use std::thread::park;
+use std::time::SystemTime;
 use bytes::Bytes;
+use colored::Colorize;
 use futures_util::TryStreamExt;
 use http_body_util::{
     BodyExt,
@@ -24,11 +22,8 @@ use hyper::{
     header::HeaderValue,
 };
 use hyper::header::RANGE;
-use regex::{Captures, Regex};
-use tokio::{
-    fs::File,
-    io::AsyncSeekExt,
-};
+use regex::Regex;
+use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 use tracing::debug;
 use urlencoding::decode;
@@ -78,15 +73,16 @@ struct Range {
 
 /// file service
 pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible> {
+    let timer = SystemTime::now();
     let path = request.uri().path();
-    for hn in request.headers().keys() {
-        debug!("HEADER: {} -> {}", hn, request.headers().get(hn).unwrap().to_str().unwrap())
-    }
-    let root = env::var(super::cli::ROOT_KEY).expect("variable HTTPRS_ROOT not set!");
+    // for hn in request.headers().keys() {
+    //     debug!("HEADER: {} -> {}", hn, request.headers().get(hn).unwrap().to_str().unwrap())
+    // }
+    let root = env::var(super::cli::ROOT_PATH_KEY).expect("environment variable HTTPRS_ROOT not set!");
     let root_path = PathBuf::from(root);
     // strip the prefix of '/' because path join will get to system root if not
     let full_path = root_path.join(decode(path).unwrap().strip_prefix("/").unwrap());
-    debug!("requesting file path: {}", full_path.to_str().unwrap());
+    // debug!("requesting file path: {}", full_path.to_str().unwrap());
 
     if full_path.exists() {
         if full_path.is_dir() {
@@ -99,7 +95,7 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
 
                 let r_path = p.path().to_str().unwrap().strip_prefix(root_path.to_str().unwrap())
                     .unwrap_or(p.path().to_str().unwrap());
-                debug!("relative path (to ROOT): {}", r_path);
+                // debug!("relative path (to ROOT): {}", r_path);
                 // skip current path showing
                 if full_path.starts_with(p.path()) {
                     continue;
@@ -118,6 +114,8 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
                 .replace("{{title}}", format!("File list on {}", html_title).as_str())
                 .replace("{{body}}", html_body.as_str());
 
+            debug!("{} {} {:?} {}µs {} {:?}", request.method().to_string().blue(), request.uri(), request.version(),
+                     timer.elapsed().unwrap().as_micros(), StatusCode::OK.to_string().green(),request.headers().get(header::USER_AGENT).unwrap());
             Ok(Response::builder()
                 .header(header::SERVER, HEADER_SERVER_VALUE)
                 .status(StatusCode::OK)
@@ -163,18 +161,21 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
                 _ => "application/octet-stream"
             };
             let decoded_path = decode(full_path.to_str().unwrap()).unwrap().to_string();
-            let mut file = File::open(decoded_path)
+            let file = File::open(decoded_path)
                 .await.expect("read file error");
 
             //
-            if get_size_bytes(&file) > RESPONSE_BODY_SIZE_LIMIT_IN_BYTES {
+            if get_size_bytes(&file).await > RESPONSE_BODY_SIZE_LIMIT_IN_BYTES {
                 let range_value = request.headers().get(RANGE).unwrap();
-                let range = Range::from(range_value).norm();
+                let _range = Range::from(range_value).norm();
                 // file.seek(SeekFrom::Start())
 
                 let body_stream = ReaderStream::new(file);
                 let body = BodyExt::map_err(
                     StreamBody::new(body_stream.map_ok(Frame::data)), infallible).boxed();
+
+                debug!("{} {} {:?} {}µs {} {:?}", request.method().to_string().blue(), request.uri(), request.version(),
+                        timer.elapsed().unwrap().as_micros(), StatusCode::OK.to_string().green(), request.headers().get(header::USER_AGENT).unwrap());
                 Ok(Response::builder()
                     .header(header::SERVER, HEADER_SERVER_VALUE)
                     .header(header::CONTENT_TYPE, HeaderValue::from_static(content_type))
@@ -185,6 +186,9 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
                 let body_stream = ReaderStream::new(file);
                 let body = BodyExt::map_err(
                     StreamBody::new(body_stream.map_ok(Frame::data)), infallible).boxed();
+
+                debug!("{} {} {:?} {}µs {} {:?}", request.method().to_string().blue(), request.uri(), request.version(),
+                        timer.elapsed().unwrap().as_micros(), StatusCode::OK.to_string().green(), request.headers().get(header::USER_AGENT).unwrap());
                 Ok(Response::builder()
                     .header(header::SERVER, HEADER_SERVER_VALUE)
                     .header(header::CONTENT_TYPE, HeaderValue::from_static(content_type))
@@ -199,6 +203,8 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
             .replace("{{title}}", format!("{}", "file not found").as_str())
             .replace("{{body}}", format!("file not found: {}", path).as_str());
 
+        debug!("{} {} {:?} {}µs {} {:?}", request.method().to_string().blue(), request.uri(), request.version(),
+                timer.elapsed().unwrap().as_micros(), StatusCode::NOT_FOUND.to_string().red(), request.headers().get(header::USER_AGENT).unwrap());
         Ok(Response::builder()
             .header(header::SERVER, HEADER_SERVER_VALUE)
             .status(StatusCode::NOT_FOUND)
@@ -249,7 +255,7 @@ impl Range {
 
     /// sort range pairs, remove overlapped ones if exist
     fn norm(self) -> Self {
-        let mut ranges = self.ranges;
+        let _ranges = self.ranges;
         Self {
             unit: self.unit,
             ranges: vec![],
@@ -276,8 +282,8 @@ pub(crate) fn local_address() -> Option<String> {
 }
 
 /// get file size bytes count. implementations should be different on different platforms.
-fn get_size_bytes(file: &File) -> u64 {
-    0
+async fn get_size_bytes(file: &File) -> u64 {
+    file.metadata().await.unwrap().len()
 }
 
 fn breadcrumbs(parent: &Path, root: &Path) -> String {
