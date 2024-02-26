@@ -114,8 +114,7 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
                 .replace("{{title}}", format!("File list on {}", html_title).as_str())
                 .replace("{{body}}", html_body.as_str());
 
-            debug!("{} {} {:?} {}µs {} {:?}", request.method().to_string().blue(), request.uri(), request.version(),
-                     timer.elapsed().unwrap().as_micros(), StatusCode::OK.to_string().green(),request.headers().get(header::USER_AGENT).unwrap());
+            log_request(&request, timer.elapsed().unwrap().as_micros());
             Ok(Response::builder()
                 .header(header::SERVER, HEADER_SERVER_VALUE)
                 .status(StatusCode::OK)
@@ -174,8 +173,7 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
                 let body = BodyExt::map_err(
                     StreamBody::new(body_stream.map_ok(Frame::data)), infallible).boxed();
 
-                debug!("{} {} {:?} {}µs {} {:?}", request.method().to_string().blue(), request.uri(), request.version(),
-                        timer.elapsed().unwrap().as_micros(), StatusCode::OK.to_string().green(), request.headers().get(header::USER_AGENT).unwrap());
+                log_request(&request, timer.elapsed().unwrap().as_micros());
                 Ok(Response::builder()
                     .header(header::SERVER, HEADER_SERVER_VALUE)
                     .header(header::CONTENT_TYPE, HeaderValue::from_static(content_type))
@@ -187,8 +185,7 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
                 let body = BodyExt::map_err(
                     StreamBody::new(body_stream.map_ok(Frame::data)), infallible).boxed();
 
-                debug!("{} {} {:?} {}µs {} {:?}", request.method().to_string().blue(), request.uri(), request.version(),
-                        timer.elapsed().unwrap().as_micros(), StatusCode::OK.to_string().green(), request.headers().get(header::USER_AGENT).unwrap());
+                log_request(&request, timer.elapsed().unwrap().as_micros());
                 Ok(Response::builder()
                     .header(header::SERVER, HEADER_SERVER_VALUE)
                     .header(header::CONTENT_TYPE, HeaderValue::from_static(content_type))
@@ -203,13 +200,19 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
             .replace("{{title}}", format!("{}", "file not found").as_str())
             .replace("{{body}}", format!("file not found: {}", path).as_str());
 
-        debug!("{} {} {:?} {}µs {} {:?}", request.method().to_string().blue(), request.uri(), request.version(),
-                timer.elapsed().unwrap().as_micros(), StatusCode::NOT_FOUND.to_string().red(), request.headers().get(header::USER_AGENT).unwrap());
+        log_request(&request, timer.elapsed().unwrap().as_micros());
         Ok(Response::builder()
             .header(header::SERVER, HEADER_SERVER_VALUE)
             .status(StatusCode::NOT_FOUND)
             .body(response_body.boxed()).unwrap())
     }
+}
+
+#[inline]
+fn log_request(request: &Request<Incoming>, time: u128) {
+    debug!("{} {} {:?} {}µs {} {:?}", request.method().to_string().blue(), request.uri(),
+        request.version(),time, StatusCode::OK.to_string().green(),
+        request.headers().get(header::USER_AGENT).unwrap());
 }
 
 
