@@ -29,8 +29,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes = "1.5"
 urlencoding = "2"
-tokio-util = "0.7.10"
-futures-util = "0.3.30"
+tokio-util = "0.7"
+futures-util = "0.3"
 regex = "^1.6"
 serde = { version = "1", features = ["derive"] }
 
