@@ -3,8 +3,8 @@ use std::{
     convert::Infallible,
     ffi::OsString,
     path::{Path, PathBuf},
+    time::SystemTime
 };
-use std::time::SystemTime;
 use bytes::Bytes;
 use colored::Colorize;
 use futures_util::TryStreamExt;
@@ -20,12 +20,12 @@ use hyper::{
     StatusCode,
     body::{Frame, Incoming},
     header::HeaderValue,
+    header::RANGE
 };
-use hyper::header::RANGE;
 use regex::Regex;
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
-use tracing::debug;
+use tracing::{debug, warn};
 use urlencoding::decode;
 use walkdir::WalkDir;
 
@@ -128,7 +128,7 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
                         "css" => "text/css; charset=utf8",
                         "js" => "text/javascript; charset=utf8",
                         "html" | "htm" | "xhtml" | "xml" => "text/html; charset=utf8",
-                        "csv" | "txt" | "text" | "md" | "json" | "toml" | "cfg" | "config" | "yaml" => {
+                        "csv" | "txt" | "text" | "md" | "json" | "toml" | "cfg" | "config" | "yaml" | "yml" => {
                             "text/plain; charset=utf8"
                         }
                         // image
@@ -210,20 +210,24 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
 
 #[inline]
 fn log_request(request: &Request<Incoming>, time: u128, status_code: StatusCode) {
-    let status = match status_code {
-        success if success.lt(&StatusCode::BAD_REQUEST) => success.to_string().green(),
-        fail if fail.ge(&StatusCode::BAD_REQUEST) => fail.to_string().red(),
-        other_status => other_status.to_string().magenta(),
+    match status_code {
+        success if success.lt(&StatusCode::BAD_REQUEST) => {
+            debug!("{} {} {:?} {}µs {} {:?}", request.method().to_string().blue(), request.uri(),
+                request.version(),time, success.to_string().green(),request.headers().get(header::USER_AGENT).unwrap());
+        }
+        fail if fail.ge(&StatusCode::BAD_REQUEST) => {
+            warn!("{} {} {:?} {}µs {} {:?}", request.method().to_string().blue(), request.uri(),
+                request.version(),time, fail.to_string().red(),request.headers().get(header::USER_AGENT).unwrap());
+        }
+        _other => {}
     };
-    debug!("{} {} {:?} {}µs {} {:?}", request.method().to_string().blue(), request.uri(),
-        request.version(),time, status,request.headers().get(header::USER_AGENT).unwrap());
 }
 
 
 impl Range {
     fn new() -> Self {
         Self {
-            unit: "".to_string(),
+            unit: "byte".to_string(),
             ranges: vec![],
         }
     }
@@ -340,18 +344,18 @@ mod tests {
         println!("{:?}", option);
     }
 
-    //#[test]
+    #[test]
     fn should_generate_breadcrumbs_header() {
         let root = PathBuf::from("/test/1/2");
         let parent = PathBuf::from("/test/1/2/3/4/5/6/7");
         let actual = breadcrumbs(parent.as_path(), root.as_path());
-        let expected = String::from(r###"<ul id="breadcrumbs">
-<li class="breadcrums-item"><a href="/"><span class="separator">/</span>ROOT</a></li>
-<li class="breadcrums-item"><a href="/3/"><span class="separator">/</span>3</a></li>
-<li class="breadcrums-item"><a href="/3/4/"><span class="separator">/</span>4</a></li>
-<li class="breadcrums-item"><a href="/3/4/5/"><span class="separator">/</span>5</a></li>
-<li class="breadcrums-item"><a href="/3/4/5/6/"><span class="separator">/</span>6</a></li>
-<li class="breadcrums-item"><a href="/3/4/5/6/7/"><span class="separator">/</span>7</a></li>
+        let expected = String::from(r###"<ul id="breadcrumbs" style="display: flex;list-style-type: none;align-items: center;">
+<li class="breadcrums-item"><a href="/"><span class="separator" style="padding: 0 5px 0 5px;">/</span><span>ROOT</span></a></li>
+<li class="breadcrums-item"><a href="/3/"><span class="separator" style="padding: 0 5px 0 5px;">/</span><span>3</span></a></li>
+<li class="breadcrums-item"><a href="/3/4/"><span class="separator" style="padding: 0 5px 0 5px;">/</span><span>4</span></a></li>
+<li class="breadcrums-item"><a href="/3/4/5/"><span class="separator" style="padding: 0 5px 0 5px;">/</span><span>5</span></a></li>
+<li class="breadcrums-item"><a href="/3/4/5/6/"><span class="separator" style="padding: 0 5px 0 5px;">/</span><span>6</span></a></li>
+<li class="breadcrums-item"><a href="/3/4/5/6/7/"><span class="separator" style="padding: 0 5px 0 5px;">/</span><span>7</span></a></li>
 </ul>
 "###);
         assert_eq!(actual, expected);

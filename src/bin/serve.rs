@@ -8,6 +8,6 @@ use httprs::{
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let config = Config::parse();
-    let mut server = Server::new(config);
+    let mut server = Server::new(config).await;
     server.run().await
 }

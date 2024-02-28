@@ -2,20 +2,22 @@ use std::{
     env,
     error::Error,
     path::PathBuf,
+    ffi::OsString,
+    time::Duration
 };
-use std::ffi::OsString;
-use std::time::Duration;
 use colored::Colorize;
 use hyper::{
     server::conn::http1,
     service::service_fn,
 };
 use hyper_util::rt::TokioIo;
-use tokio::net::TcpListener;
-use tokio::signal::ctrl_c;
-use tokio::sync::broadcast::{channel, Receiver, Sender};
-use tokio::time::sleep;
-use tracing::{debug, info};
+use tokio::{
+    net::TcpListener,
+    signal::ctrl_c,
+    sync::broadcast::{channel, Receiver, Sender},
+    time::sleep
+};
+use tracing::{debug, error, info};
 use super::{
     cli::{Config, ROOT_PATH_KEY},
     http::{file_service, local_address},
@@ -34,27 +36,29 @@ pub struct Server {
     config: Config,
     listener: Option<TcpListener>,
     notifier: Sender<()>,
-    shutdown: Shutdown
+    shutdown: Shutdown,
 }
 
 impl Server {
-    pub fn new(config: Config) -> Self {
-        let (notifier, receiver) = channel(1);
-        Server {
-            config,
-            listener: None,
-            notifier,
-            shutdown: Shutdown::new(receiver),
+    pub async fn new(config: Config) -> Self {
+        match config.merged().await {
+            Ok(config) => {
+                let (notifier, receiver) = channel(1);
+                Server {
+                    config,
+                    listener: None,
+                    notifier,
+                    shutdown: Shutdown::new(receiver),
+                }
+            }
+            Err(err) => {
+                panic!("cannot parse parameters: {}", err);
+            }
         }
     }
 
     pub async fn run(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_target(false)
-            .with_ansi(true)
-            .with_level(false)
-            .init();
+        self.setup_logging();
 
         let default_host = DEFAULT_HOST.to_string();
         let host = self.config.host.as_ref().unwrap_or(&default_host);
@@ -63,34 +67,36 @@ impl Server {
         let root_path = self.config.root.as_ref().unwrap_or(&default_root);
         env::set_var(ROOT_PATH_KEY, PathBuf::from(&root_path).as_path());
         debug!("Setting ROOT_PATH environment variable to {}", root_path.to_str().unwrap());
+        debug!("Serving with configuration: {}", self.config.display());
 
         let binding_addr = format!("{}:{}", host, port);
         let protocol = if self.config.tls { "HTTPS" } else { "HTTP" };
 
-        if let Ok(listener) = TcpListener::bind(binding_addr).await {
-            self.listener = Some(listener);
-            // TODO: simplify printing
-            println!(
-                "Serving {} on: {}",
-                protocol.green(),
-                format!(
-                    "{}://{}",
-                    protocol.to_lowercase(),
-                    self.listener.as_ref().unwrap().local_addr().unwrap()
-                ).green()
-            );
-            if host == "0.0.0.0" {
-                if let Some(ip) = local_address() {
-                    println!(
-                        "Local Network {} on: {}",
-                        protocol.green(),
-                        format!("{}://{}:{}", protocol.to_lowercase(), ip, port).green()
-                    );
+        match TcpListener::bind(binding_addr.clone()).await {
+            Ok(listener) => {
+                self.listener = Some(listener);
+                // TODO: simplify printing
+                println!(
+                    "Serving {} on: {}",
+                    protocol.green(),
+                    format!(
+                        "{}://{}",
+                        protocol.to_lowercase(),
+                        self.listener.as_ref().unwrap().local_addr().unwrap()
+                    ).green()
+                );
+                if host == "0.0.0.0" {
+                    if let Some(ip) = local_address() {
+                        println!(
+                            "Local Network {} on: {}",
+                            protocol.green(),
+                            format!("{}://{}:{}", protocol.to_lowercase(), ip, port).green()
+                        );
+                    }
                 }
-            }
 
-            if self.config.graceful_shutdown {
-                tokio::select! {
+                if self.config.graceful_shutdown {
+                    tokio::select! {
                     _ = async {
                         loop {
                             let (tcp, _) = self.listener.as_ref().unwrap().accept().await.unwrap();
@@ -101,11 +107,11 @@ impl Server {
                                     .serve_connection(TokioIo::new(tcp), service_fn(file_service))
                                     .await
                                     {
-                                        info!("Error serving connection: {:?}", err);
+                                        error!("Error serving connection: {:?}", err);
                                     }
                                 } => {},
                                 _ = self.shutdown.recv() => {
-                                    println!("signal received...");
+                                    info!("shutdown signal received...");
                                 }
                             }
                             // if self.shutdown.in_shutdown() {
@@ -114,27 +120,46 @@ impl Server {
                         }
                     } => {},
                     _ = ctrl_c() => {
-                        println!("received ctrl_c signal, exiting...");
+                        info!("received ctrl_c signal, exiting...");
                         self.notifier.send(()).unwrap();
-                        let _ = sleep(Duration::from_secs(10)).await;
+                        let _ = sleep(Duration::from_secs(5)).await;
                     }
                 }
-            } else {
-                // without graceful shutdown
-                loop {
-                    let (tcp, _) = self.listener.as_ref().unwrap().accept().await?;
-                    tokio::task::spawn(async move {
-                        if let Err(err) = http1::Builder::new()
-                            .serve_connection(TokioIo::new(tcp), service_fn(file_service))
-                            .await
-                        {
-                            info!("Error serving connection: {:?}", err);
-                        }
-                    });
+                } else {
+                    // without graceful shutdown
+                    loop {
+                        let (tcp, _) = self.listener.as_ref().unwrap().accept().await?;
+                        tokio::task::spawn(async move {
+                            if let Err(err) = http1::Builder::new()
+                                .serve_connection(TokioIo::new(tcp), service_fn(file_service))
+                                .await
+                            {
+                                error!("Error serving connection: {:?}", err);
+                            }
+                        });
+                    }
                 }
             }
+            Err(err) => {
+                panic!("cannot bind to address {}: {}", binding_addr, err);
+            }
         }
+
         Ok(())
+    }
+
+    fn setup_logging(&self) {
+        let level = if self.config.quiet {
+            tracing::Level::WARN
+        } else {
+            tracing::Level::DEBUG
+        };
+        tracing_subscriber::fmt()
+            .with_max_level(level)
+            .with_target(false)
+            .with_ansi(true)
+            .with_level(false)
+            .init();
     }
 }
 
