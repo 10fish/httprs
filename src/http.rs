@@ -44,12 +44,12 @@ const HTML_TEMPLATE: &'static str = r###"
 <hr>
 {{body}}
 <hr>
-<p style="text-align: center;"><i>Powered by httprs v0.1.0 © 2024</i></p>
+<p style="text-align: center;"><i>Powered by httprs v0.2.0 © 2024</i></p>
 </body>
 </html>
 "###;
 
-const HEADER_SERVER_VALUE: HeaderValue = HeaderValue::from_static("httprs v0.1.0");
+const HEADER_SERVER_VALUE: HeaderValue = HeaderValue::from_static("httprs v0.2.0");
 
 // HTTP response body max size set to 50MB
 const RESPONSE_BODY_SIZE_LIMIT_IN_BYTES: u64 = 50 * 1024 * 1024;
