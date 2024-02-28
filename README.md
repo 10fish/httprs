@@ -34,6 +34,7 @@ cargo install httprs
 
 - [ ] Logging
     - [x] Request/Response Logging
+    - [x] Silent Mode
     - [ ] Logging Level
     - [ ] Logging Output into File
 - [ ] File Type Support
@@ -57,7 +58,7 @@ cargo install httprs
 - [ ] Authentication
   - [ ] Simple Basic
   - [ ] Token Based
-- [ ] Graceful Shutdown
+- [x] Graceful Shutdown
 - [ ] Proxy
 - [ ] Themes and Appearances Customization
 
