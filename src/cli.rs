@@ -15,7 +15,7 @@ pub const ROOT_PATH_KEY: &'static str = "HTTPRS_ROOT";
 
 /// Simple cli http server for static files
 #[derive(Debug, Parser, Deserialize)]
-#[command(name = "httprs", author = "10fish", version = "0.2.0")]
+#[command(name = "httprs", author = "10fish", version = "0.2.1")]
 #[command(version, about, long_about = None, after_long_help = "./after-help.md")]
 pub struct Config {
     /// path of toml config file
