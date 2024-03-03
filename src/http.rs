@@ -3,7 +3,8 @@ use std::{
     convert::Infallible,
     ffi::OsString,
     path::{Path, PathBuf},
-    time::SystemTime
+    time::SystemTime,
+    cmp::{max, min, Ordering}
 };
 use bytes::Bytes;
 use colored::Colorize;
@@ -51,7 +52,7 @@ const HTML_TEMPLATE: &'static str = r###"
 
 const HEADER_SERVER_VALUE: HeaderValue = HeaderValue::from_static("httprs v0.2.0");
 
-// HTTP response body max size set to 50MB
+/// response with partial content when body size larger than 50MB
 const RESPONSE_BODY_SIZE_LIMIT_IN_BYTES: u64 = 50 * 1024 * 1024;
 
 /// HTTP request header `RANGE` value regex. usually it can be one of following forms:
@@ -62,13 +63,19 @@ const RESPONSE_BODY_SIZE_LIMIT_IN_BYTES: u64 = 50 * 1024 * 1024;
 /// Range: <unit>=<range-start>-<range-end>, <range-start>-<range-end>, <range-start>-<range-end>
 /// Range: <unit>=-<suffix-length>
 /// ```
-const HTTP_HEADER_RANGE_REGEX: &'static str = "^([\\w\\W]+)\\s*=\\s*(((-\\d+)|(\\d+-\\d+)|(\\d+-)),\\s*)+";
+const HEADER_RANGE_VALUE_REGEX: &'static str = "^([\\w]+)\\s*=\\s*(-\\d+|\\d+-\\d+|\\d+-)(,\\s*(-\\d+|\\d+-\\d+|\\d+-))*";
+const RANGE_REGEX: &'static str = "((-\\d+)|(\\d+-\\d+)|(\\d+-))";
 
-struct RangePair(Option<u64>, Option<u64>);
+const DEFAULT_RANGE_UNIT: &'static str = "bytes";
+const DEFAULT_REQUEST_RANGE_VALUE: &'static str = "bytes=0-";
 
+#[derive(Debug, PartialEq, Eq, Clone)]
+struct RangeValue(Option<u64>, Option<u64>);
+
+#[derive(Debug, PartialEq, Eq, Clone)]
 struct Range {
     unit: String,
-    ranges: Vec<RangePair>,
+    ranges: Vec<RangeValue>,
 }
 
 /// file service
@@ -160,13 +167,13 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
                 _ => "application/octet-stream"
             };
             let decoded_path = decode(full_path.to_str().unwrap()).unwrap().to_string();
-            let file = File::open(decoded_path)
-                .await.expect("read file error");
+            let file = File::open(decoded_path).await.expect("read file error");
+            let file_size = get_size_bytes(&file).await;
 
-            //
-            if get_size_bytes(&file).await > RESPONSE_BODY_SIZE_LIMIT_IN_BYTES {
-                let range_value = request.headers().get(RANGE).unwrap();
-                let _range = Range::from(range_value).norm();
+            if file_size > RESPONSE_BODY_SIZE_LIMIT_IN_BYTES {
+                let default_range = HeaderValue::from_static(DEFAULT_REQUEST_RANGE_VALUE);
+                let range_value = request.headers().get(RANGE).unwrap_or(&default_range);
+                let _range = Range::from(range_value).combined();
                 // file.seek(SeekFrom::Start())
 
                 let body_stream = ReaderStream::new(file);
@@ -177,7 +184,8 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
                 Ok(Response::builder()
                     .header(header::SERVER, HEADER_SERVER_VALUE)
                     .header(header::CONTENT_TYPE, HeaderValue::from_static(content_type))
-                    .header(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"))
+                    .header(header::ACCEPT_RANGES, HeaderValue::from_static(DEFAULT_RANGE_UNIT))
+                    .header(header::CONTENT_LENGTH, HeaderValue::from(file_size))
                     .status(StatusCode::OK)
                     .body(body).unwrap())
             } else {
@@ -189,7 +197,8 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
                 Ok(Response::builder()
                     .header(header::SERVER, HEADER_SERVER_VALUE)
                     .header(header::CONTENT_TYPE, HeaderValue::from_static(content_type))
-                    .header(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"))
+                    .header(header::ACCEPT_RANGES, HeaderValue::from_static(DEFAULT_RANGE_UNIT))
+                    .header(header::CONTENT_LENGTH, HeaderValue::from(file_size))
                     .status(StatusCode::OK)
                     .body(body).unwrap())
             }
@@ -227,7 +236,7 @@ fn log_request(request: &Request<Incoming>, time: u128, status_code: StatusCode)
 impl Range {
     fn new() -> Self {
         Self {
-            unit: "byte".to_string(),
+            unit: DEFAULT_RANGE_UNIT.to_string(),
             ranges: vec![],
         }
     }
@@ -235,27 +244,27 @@ impl Range {
     /// parse value from http header value.
     fn from(val: &HeaderValue) -> Self {
         let range = val.to_str().unwrap();
-        let mut unit: String = String::new();
+        let mut unit: String = String::from(DEFAULT_RANGE_UNIT);
         let mut ranges = vec![];
-        let regex = Regex::new(HTTP_HEADER_RANGE_REGEX).unwrap();
+        let regex = Regex::new(HEADER_RANGE_VALUE_REGEX).unwrap();
         match regex.captures(range) {
-            None => {}
+            None => {
+                warn!("not a valid HTTP Range header value: {}", range);
+            }
             Some(caps) => {
-                for cap in caps.iter() {
-                    if let Some(cont) = cap {
-                        let pair = cont.as_str();
-                        if pair.contains('-') {
-                            let idx = pair.find('-').unwrap();
-                            if idx == 0 {
-                                ranges.push(RangePair(None, Some((&pair[1..]).parse::<u64>().unwrap())));
-                            } else if idx == pair.len() - 1 {
-                                ranges.push(RangePair(Some(pair[..idx].parse::<u64>().unwrap()), None));
-                            } else {
-                                ranges.push(RangePair(Some(pair[idx + 1..].parse::<u64>().unwrap()),
-                                                      Some(pair[idx + 1..].parse::<u64>().unwrap())))
-                            }
+                unit = String::from(caps.get(1).unwrap().as_str());
+                let range_regex = Regex::new(RANGE_REGEX).unwrap();
+                for m in range_regex.find_iter(range) {
+                    let pair = m.as_str();
+                    if pair.contains('-') {
+                        let idx = pair.find('-').unwrap();
+                        if idx == 0 {
+                            ranges.push(RangeValue(None, Some((&pair[1..]).parse::<u64>().unwrap())));
+                        } else if idx == pair.len() - 1 {
+                            ranges.push(RangeValue(Some(pair[..idx].parse::<u64>().unwrap()), None));
                         } else {
-                            unit = String::from(pair);
+                            ranges.push(RangeValue(Some(pair[..idx].parse::<u64>().unwrap()),
+                                                   Some(pair[idx + 1..].parse::<u64>().unwrap())))
                         }
                     }
                 }
@@ -265,11 +274,99 @@ impl Range {
     }
 
     /// sort range pairs, remove overlapped ones if exist
-    fn norm(self) -> Self {
-        let _ranges = self.ranges;
+    fn combined(mut self) -> Self {
+        if self.ranges.len() < 1 {
+            return Self {
+                unit: self.unit,
+                ranges: vec![],
+            };
+        }
+        // sort RangeValue by start, and combine that overlapped
+        self.ranges.sort();
+        let mut ranges = vec![];
+        let mut r = self.ranges[0].clone();
+        for i in 1..self.ranges.len() {
+            if r.overlapping(&self.ranges[i]) {
+                r = r.combine(&self.ranges[i])
+            } else {
+                ranges.push(r.normalize());
+                r = self.ranges[i].clone();
+            }
+        }
+        ranges.push(r.normalize());
         Self {
             unit: self.unit,
-            ranges: vec![],
+            ranges,
+        }
+    }
+}
+
+impl RangeValue {
+    pub(crate) fn new(start: Option<u64>, end: Option<u64>) -> Self {
+        if start.is_some() && end.is_some() {
+            if start.as_ref().unwrap() > end.as_ref().unwrap() {
+                warn!("invalid parameters: start should be no large than end, start {:?}, end {:?}",
+                    start, end);
+                return Self(Some(0), Some(0));
+            }
+        }
+        if start.is_none() && end.is_none() {
+            warn!("invalid parameters: non sense with both start and end be None");
+            return Self(Some(0), Some(0));
+        }
+        Self(start, end)
+    }
+
+    /// combine two overlapped ranges into one. e.g. (64, 512) and (256, 1024) combining into (64, 1024).
+    pub(crate) fn combine(self, other: &Self) -> Self {
+        if self.overlapping(other) {
+            let self_norm = self.normalize();
+            let other_norm = other.normalize();
+            return Self::new(Some(min(self_norm.0.unwrap(), other_norm.0.unwrap())),
+                             Some(max(self_norm.1.unwrap(), other_norm.1.unwrap())));
+        }
+        warn!("range is not overlapping with parameter, staying not combined: {:?} <-> {:?}", self, other);
+        self
+    }
+
+    /// check if the two are overlapping. e.g. [64-512] and [256, 1024] are overlapping.
+    pub(crate) fn overlapping(&self, other: &Self) -> bool {
+        let self_norm = self.normalize();
+        let other_norm = other.normalize();
+        (other_norm.0.unwrap() >= self_norm.0.unwrap() && other_norm.0.unwrap() <= self_norm.1.unwrap()) ||
+            (other_norm.1.unwrap() >= self_norm.0.unwrap() && other_norm.1.unwrap() <= self_norm.1.unwrap())
+    }
+
+    /// fix range value with a start or en end None value
+    fn normalize(&self) -> Self {
+        Self(Some(self.0.unwrap_or(0)), Some(self.1.unwrap_or(i64::MAX as u64)))
+    }
+
+    /// generate content-range value for this bytes range
+    fn content_range(&self, total: u64) -> String {
+        let norm = self.normalize();
+        format!("{}-{}/{}", norm.0.unwrap(), min(norm.1.unwrap(), total), total)
+    }
+}
+
+impl PartialOrd<Self> for RangeValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        let self_norm = self.normalize();
+        let other_norm = other.normalize();
+        match self_norm.0.unwrap().partial_cmp(&other_norm.1.unwrap()) {
+            Some(Ordering::Equal) => self_norm.1.unwrap().partial_cmp(&other_norm.1.unwrap()),
+            other => other
+        }
+    }
+}
+
+impl Ord for RangeValue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let self_norm = self.normalize();
+        let other_norm = other.normalize();
+        match self_norm.0.unwrap().cmp(&other_norm.1.unwrap()) {
+            Ordering::Equal => self_norm.1.unwrap().cmp(&other_norm.1.unwrap()),
+            other => other
         }
     }
 }
@@ -359,5 +456,124 @@ mod tests {
 </ul>
 "###);
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn should_match_range_header() {
+        let regex = Regex::new(HEADER_RANGE_VALUE_REGEX).unwrap();
+
+        let range_value1 = "bytes=1024-65335";
+        assert!(regex.captures(range_value1).is_some(), "regex should range value1");
+
+        let range_value2 = "bytes=-65335, 102400-";
+        assert!(regex.captures(range_value2).is_some(), "regex should range value2");
+
+        let range_value3 = "bytes=-65335,102400-";
+        assert!(regex.captures(range_value3).is_some(), "regex should range value3");
+
+        let range_value4 = "bytes=-612233";
+        assert!(regex.captures(range_value4).is_some(), "regex should range value4");
+
+        let range_value5 = "bytes=1024-2048, 3072-4096, 6172-102400";
+        assert!(regex.captures(range_value5).is_some(), "regex should range value5");
+    }
+
+    #[test]
+    fn should_parse_range0() {
+        let range_header = HeaderValue::from_static("bytes=1024-65535");
+        let expected_ranges = vec![RangeValue::new(Some(1024), Some(65535))];
+        let range = Range::from(&range_header);
+        assert_eq!(range.unit, String::from("bytes"));
+        assert_eq!(range.ranges[0], expected_ranges[0]);
+    }
+
+    #[test]
+    fn should_parse_range1() {
+        let range_header = HeaderValue::from_static("bytes=-1024, 23345-");
+        let expected_ranges = vec![
+            RangeValue::new(None, Some(1024)),
+            RangeValue::new(Some(23345), None),
+        ];
+        let range = Range::from(&range_header);
+        assert_eq!(range.unit, String::from("bytes"));
+        assert_eq!(range.ranges, expected_ranges);
+    }
+
+    #[test]
+    fn should_parse_range2() {
+        let range_header = HeaderValue::from_static("bytes=1-12, 102400-, 12-24,24-96,96-1024");
+        let expected_ranges = vec![
+            RangeValue::new(Some(1), Some(12)),
+            RangeValue::new(Some(102400), None),
+            RangeValue::new(Some(12), Some(24)),
+            RangeValue::new(Some(24), Some(96)),
+            RangeValue::new(Some(96), Some(1024)),
+        ];
+        let range = Range::from(&range_header);
+        assert_eq!(range.unit, String::from("bytes"));
+        assert_eq!(range.ranges, expected_ranges);
+    }
+
+    #[test]
+    fn should_ranges_combined0() {
+        let mut range = Range::new();
+        range.ranges = vec![
+            RangeValue::new(Some(10), Some(36)),
+            RangeValue::new(Some(72), Some(144)),
+            RangeValue::new(Some(8), Some(512)),
+            RangeValue::new(None, Some(96)),
+            RangeValue::new(Some(1024), None),
+        ];
+        let mut expected = Range::new();
+        expected.ranges = vec![
+            RangeValue::new(Some(0), Some(512)),
+            RangeValue::new(Some(1024), Some(i64::MAX as u64)),
+        ];
+
+        let actual = range.combined();
+
+        assert_eq!(actual, expected, "ranges should be combined and not overlapping");
+    }
+
+    #[test]
+    fn should_ranges_combined1() {
+        let mut range = Range::new();
+        range.ranges = vec![
+            RangeValue::new(None, Some(1024)),
+            RangeValue::new(Some(512), None),
+        ];
+        let mut expected = Range::new();
+        expected.ranges = vec![
+            RangeValue::new(Some(0), Some(i64::MAX as u64)),
+        ];
+
+        let actual = range.combined();
+
+        assert_eq!(actual, expected, "ranges should be combined and not overlapping");
+    }
+
+
+    #[test]
+    fn should_ranges_not_combined() {
+        let mut range = Range::new();
+        range.ranges = vec![
+            RangeValue::new(Some(512), Some(1024)),
+            RangeValue::new(Some(10240), None),
+            RangeValue::new(None, Some(256)),
+            RangeValue::new(Some(2048), Some(5120)),
+            RangeValue::new(Some(6172), Some(8192)),
+        ];
+        let mut expected = Range::new();
+        expected.ranges = vec![
+            RangeValue::new(Some(0), Some(256)),
+            RangeValue::new(Some(512), Some(1024)),
+            RangeValue::new(Some(2048), Some(5120)),
+            RangeValue::new(Some(6172), Some(8192)),
+            RangeValue::new(Some(10240), Some(i64::MAX as u64)),
+        ];
+
+        let actual = range.combined();
+
+        assert_eq!(actual, expected, "ranges should be combined and not overlapping");
     }
 }
