@@ -33,6 +33,7 @@ tokio-util = "0.7"
 futures-util = "0.3"
 regex = "^1.6"
 serde = { version = "1", features = ["derive"] }
+lazy_static = "1"
 
 [[bin]]
 name = "httprs"

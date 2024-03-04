@@ -21,6 +21,7 @@ use tracing::{debug, error, info};
 use super::{
     cli::{Config, ROOT_PATH_KEY},
     http::{file_service, local_address},
+    VERSION_STRING
 };
 
 /// default binding host.
@@ -75,8 +76,9 @@ impl Server {
         match TcpListener::bind(binding_addr.clone()).await {
             Ok(listener) => {
                 self.listener = Some(listener);
+                info!("Server {} started.",VERSION_STRING.bright_blue());
                 // TODO: simplify printing
-                println!(
+                info!(
                     "Serving {} on: {}",
                     protocol.green(),
                     format!(
@@ -87,7 +89,7 @@ impl Server {
                 );
                 if host == "0.0.0.0" {
                     if let Some(ip) = local_address() {
-                        println!(
+                        info!(
                             "Local Network {} on: {}",
                             protocol.green(),
                             format!("{}://{}:{}", protocol.to_lowercase(), ip, port).green()

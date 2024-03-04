@@ -23,12 +23,14 @@ use hyper::{
     header::HeaderValue,
     header::RANGE
 };
+use lazy_static::lazy_static;
 use regex::Regex;
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, warn};
 use urlencoding::decode;
 use walkdir::WalkDir;
+use crate::VERSION_STRING;
 
 const HTML_TEMPLATE: &'static str = r###"
 <!doctype html>
@@ -45,12 +47,14 @@ const HTML_TEMPLATE: &'static str = r###"
 <hr>
 {{body}}
 <hr>
-<p style="text-align: center;"><i>Powered by httprs v0.2.1 © 2024</i></p>
+<p style="text-align: center;"><i>Powered by {{version}} © 2024</i></p>
 </body>
 </html>
 "###;
 
-const HEADER_SERVER_VALUE: HeaderValue = HeaderValue::from_static("httprs v0.2.1");
+lazy_static! {
+    static ref HEADER_SERVER_VALUE: HeaderValue = HeaderValue::from_static(VERSION_STRING.as_str());
+}
 
 /// response with partial content when body size larger than 50MB
 const RESPONSE_BODY_SIZE_LIMIT_IN_BYTES: u64 = 50 * 1024 * 1024;
@@ -117,13 +121,14 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
 
 
             let response_body = HTML_TEMPLATE
+                .replace("{{version}}", VERSION_STRING.as_str())
                 .replace("{{header}}", breadcrumbs(full_path.as_path(), root_path.as_path()).as_str())
                 .replace("{{title}}", format!("File list on {}", html_title).as_str())
                 .replace("{{body}}", html_body.as_str());
 
             log_request(&request, timer.elapsed().unwrap().as_micros(), StatusCode::OK);
             Ok(Response::builder()
-                .header(header::SERVER, HEADER_SERVER_VALUE)
+                .header(header::SERVER, HEADER_SERVER_VALUE.clone())
                 .status(StatusCode::OK)
                 .body(BoxBody::new(response_body)).unwrap())
         } else {
@@ -182,7 +187,7 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
 
                 log_request(&request, timer.elapsed().unwrap().as_micros(), StatusCode::OK);
                 Ok(Response::builder()
-                    .header(header::SERVER, HEADER_SERVER_VALUE)
+                    .header(header::SERVER, HEADER_SERVER_VALUE.clone())
                     .header(header::CONTENT_TYPE, HeaderValue::from_static(content_type))
                     .header(header::ACCEPT_RANGES, HeaderValue::from_static(DEFAULT_RANGE_UNIT))
                     .header(header::CONTENT_LENGTH, HeaderValue::from(file_size))
@@ -195,7 +200,7 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
 
                 log_request(&request, timer.elapsed().unwrap().as_micros(), StatusCode::OK);
                 Ok(Response::builder()
-                    .header(header::SERVER, HEADER_SERVER_VALUE)
+                    .header(header::SERVER, HEADER_SERVER_VALUE.clone())
                     .header(header::CONTENT_TYPE, HeaderValue::from_static(content_type))
                     .header(header::ACCEPT_RANGES, HeaderValue::from_static(DEFAULT_RANGE_UNIT))
                     .header(header::CONTENT_LENGTH, HeaderValue::from(file_size))
@@ -211,7 +216,7 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
 
         log_request(&request, timer.elapsed().unwrap().as_micros(), StatusCode::NOT_FOUND);
         Ok(Response::builder()
-            .header(header::SERVER, HEADER_SERVER_VALUE)
+            .header(header::SERVER, HEADER_SERVER_VALUE.clone())
             .status(StatusCode::NOT_FOUND)
             .body(response_body.boxed()).unwrap())
     }
