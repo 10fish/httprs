@@ -4,9 +4,10 @@ use std::{
     ffi::OsString,
     path::{Path, PathBuf},
     time::SystemTime,
-    cmp::{max, min, Ordering}
+    cmp::{max, min, Ordering},
 };
 use bytes::Bytes;
+use chrono::{DateTime, Local};
 use colored::Colorize;
 use futures_util::TryStreamExt;
 use http_body_util::{
@@ -21,7 +22,7 @@ use hyper::{
     StatusCode,
     body::{Frame, Incoming},
     header::HeaderValue,
-    header::RANGE
+    header::RANGE,
 };
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -43,14 +44,53 @@ const HTML_TEMPLATE: &'static str = r###"
     <title>{{title}}</title>
 </head>
 <body>
-{{header}}
-<hr>
-{{body}}
-<hr>
-<p style="text-align: center;"><i>Powered by {{version}} © 2024</i></p>
+    {{header}}
+    <hr>
+    {{body}}
+    <hr>
+    <p style="text-align: center;"><i>Powered by {{version}} © 2024</i></p>
 </body>
 </html>
 "###;
+
+const FILE_LIST_TABLE_TEMPLATE: &'static str = r###"
+<table style="margin-left: 1em">
+    <thead style="font-style: italic;">
+        <tr>
+            <td style="padding-right: 1em;">File Name</td>
+            <td style="padding-right: 1em;">Size</td>
+            <td style="padding-right: 1em;">Last Modified</td>
+        </tr>
+    </thead>
+    <tbody>
+        {{filelist}}
+    </tbody>
+</table>
+"###;
+
+const FILE_LIST_TABLE_ROW: &'static str = r###"
+<tr>
+    <td style="padding-right: 1em;"><a href="{{link}}">{{filename}}</a></td>
+    <td style="padding-right: 1em;">{{filesize}}</td>
+    <td style="padding-right: 1em;">{{modified}}</td>
+</tr>
+"###;
+
+const BREADCRUMBS_TEMPLATE: &'static str = r###"
+<ul id="breadcrumbs" style="display: flex;list-style: none;align-items: center;padding-inline: unset;margin-left: 1em;">
+    {{items}}
+</ul>
+"###;
+
+const BREADCRUMBS_ITEM: &'static str = r###"
+<li class="breadcrums-item">
+    <a href="{{link}}">
+        <span class="separator" style="padding: 0 5px 0 5px;">/</span>
+        <span>{{label}}</span>
+    </a>
+</li>
+"###;
+
 
 lazy_static! {
     static ref HEADER_SERVER_VALUE: HeaderValue = HeaderValue::from_static(VERSION_STRING.as_str());
@@ -98,7 +138,7 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
     if full_path.exists() {
         if full_path.is_dir() {
             let html_title = full_path.to_str().unwrap();
-            let mut html_body = String::from("<ul id=\"file-list\" style=\"list-style-type: none;\">\n");
+            let mut file_list = String::new();
 
             let mut empty_content = "&lt;empty&gt;";
             for entry in WalkDir::new(full_path.clone()).max_depth(1) {
@@ -111,19 +151,26 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
                 if full_path.starts_with(p.path()) {
                     continue;
                 }
-                html_body += format!(
-                    "<li><a href=\"{}\">{}</a></li>\n", r_path, p.file_name().to_str().unwrap()
-                ).as_str();
+                let meta = &p.metadata().unwrap();
+                let modified: DateTime<Local> = meta.modified().unwrap().into();
+                file_list += String::from(FILE_LIST_TABLE_ROW)
+                    .replace("{{link}}", r_path)
+                    .replace("{{filename}}", p.file_name().to_str().unwrap())
+                    .replace("{{filesize}}", format!("{}", meta.len()).as_str())
+                    .replace("{{modified}}", modified.format("%b %d %Y - %H:%M").to_string().as_str())
+                    .as_str();
+            }
+            if file_list != "" {
                 empty_content = "";
             }
-            html_body += "</ul>\n";
-            html_body += empty_content;
+            let mut html_body = String::from(FILE_LIST_TABLE_TEMPLATE)
+                .replace("{{filelist}}", file_list.as_str());
 
 
             let response_body = HTML_TEMPLATE
                 .replace("{{version}}", VERSION_STRING.as_str())
                 .replace("{{header}}", breadcrumbs(full_path.as_path(), root_path.as_path()).as_str())
-                .replace("{{title}}", format!("File list on {}", html_title).as_str())
+                .replace("{{title}}", format!("File list under {}", html_title).as_str())
                 .replace("{{body}}", html_body.as_str());
 
             log_request(&request, timer.elapsed().unwrap().as_micros(), StatusCode::OK);
@@ -413,23 +460,23 @@ fn breadcrumbs(parent: &Path, root: &Path) -> String {
     }
     // println!("dirs: {:?}", dirs);
 
-    let mut breadcrumbs: String = String::from("<ul id=\"breadcrumbs\" style=\"display: flex;list-style-type: none;align-items: center;\">\n");
-    let mut link_path = String::from("/");
-    let mut link_name = String::from("ROOT");
+    let mut link = String::from("/");
+    let mut label = String::from("ROOT");
+    let mut items = String::new();
     loop {
-        breadcrumbs += format!("<li class=\"breadcrums-item\"><a href=\"{}\">\
-        <span class=\"separator\" style=\"padding: 0 5px 0 5px;\">/</span><span>{}</span></a></li>\n",
-                               link_path, link_name).as_str();
+        items += String::from(BREADCRUMBS_ITEM)
+            .replace("{{link}}", link.as_str())
+            .replace("{{label}}", label.as_str())
+            .as_str();
         if dirs.is_empty() {
             break;
         }
         let p = dirs.pop().unwrap();
-        link_name = p.to_str().unwrap().to_string();
-        link_path += link_name.as_str();
-        link_path += "/";
+        label = p.to_str().unwrap().to_string();
+        link += label.as_str();
+        link += "/";
     }
-    breadcrumbs += "</ul>\n";
-    breadcrumbs
+    String::from(BREADCRUMBS_TEMPLATE).replace("{{items}}", items.as_str())
 }
 
 fn infallible(error: std::io::Error) -> Infallible {
@@ -450,17 +497,29 @@ mod tests {
     fn should_generate_breadcrumbs_header() {
         let root = PathBuf::from("/test/1/2");
         let parent = PathBuf::from("/test/1/2/3/4/5/6/7");
+        let links: Vec<(&str, &str)> = vec![
+            ("/", "ROOT"),
+            ("/3/", "3"),
+            ("/3/4/", "4"),
+            ("/3/4/5/", "5"),
+            ("/3/4/5/6/", "6"),
+            ("/3/4/5/6/7/", "7"),
+        ];
         let actual = breadcrumbs(parent.as_path(), root.as_path());
-        let expected = String::from(r###"<ul id="breadcrumbs" style="display: flex;list-style-type: none;align-items: center;">
-<li class="breadcrums-item"><a href="/"><span class="separator" style="padding: 0 5px 0 5px;">/</span><span>ROOT</span></a></li>
-<li class="breadcrums-item"><a href="/3/"><span class="separator" style="padding: 0 5px 0 5px;">/</span><span>3</span></a></li>
-<li class="breadcrums-item"><a href="/3/4/"><span class="separator" style="padding: 0 5px 0 5px;">/</span><span>4</span></a></li>
-<li class="breadcrums-item"><a href="/3/4/5/"><span class="separator" style="padding: 0 5px 0 5px;">/</span><span>5</span></a></li>
-<li class="breadcrums-item"><a href="/3/4/5/6/"><span class="separator" style="padding: 0 5px 0 5px;">/</span><span>6</span></a></li>
-<li class="breadcrums-item"><a href="/3/4/5/6/7/"><span class="separator" style="padding: 0 5px 0 5px;">/</span><span>7</span></a></li>
-</ul>
-"###);
-        assert_eq!(actual, expected);
+        let mut items = String::new();
+        for (link, label) in links {
+            items += String::from(BREADCRUMBS_ITEM)
+                .replace("{{link}}", link)
+                .replace("{{label}}", label)
+                .as_str();
+        }
+        let mut expected = String::from(BREADCRUMBS_TEMPLATE)
+            .replace("{{items}}", items.as_str());
+
+        // remove all spaces to compare
+        let regex = Regex::new(r"[\s]").unwrap();
+        assert_eq!(regex.replace_all(actual.as_str(), ""),
+                   regex.replace_all(expected.as_str(), ""));
     }
 
     #[test]
