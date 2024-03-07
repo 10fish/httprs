@@ -190,6 +190,8 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
                         "csv" | "txt" | "text" | "md" | "json" | "toml" | "cfg" | "config" | "yaml" | "yml" => {
                             "text/plain; charset=utf8"
                         }
+                        // documents
+                        "pdf" => "application/pdf",
                         // image
                         "gif" => "image/gif",
                         "jpeg" | "jpg" => "image/jpeg",
