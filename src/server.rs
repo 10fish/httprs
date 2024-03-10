@@ -18,20 +18,12 @@ use tokio::{
     time::sleep
 };
 use tracing::{debug, error, info};
+use crate::cli::{DEFAULT_HOST, DEFAULT_PORT, DEFAULT_ROOT_PATH};
 use super::{
     cli::{Config, ROOT_PATH_KEY},
     http::{file_service, local_address},
     VERSION_STRING
 };
-
-/// default binding host.
-const DEFAULT_HOST: &'static str = "127.0.0.1";
-
-/// default binding port.
-const DEFAULT_PORT: u16 = 9900;
-
-/// default serving directory.
-const DEFAULT_ROOT_PATH: &'static str = ".";
 
 pub struct Server {
     config: Config,

@@ -1,17 +1,26 @@
 use std::{
     ffi::OsString,
-    error::Error
+    error::Error,
 };
 use clap::Parser;
 use tokio::{
     fs::File,
-    io::AsyncReadExt
+    io::AsyncReadExt,
 };
 use tracing::error;
 use serde::Deserialize;
 
 /// global environment variable for serving root directory. default to current directory [.]
-pub const ROOT_PATH_KEY: &'static str = "HTTPRS_ROOT";
+pub(crate) const ROOT_PATH_KEY: &'static str = "HTTPRS_ROOT";
+
+/// default binding host.
+pub(crate) const DEFAULT_HOST: &'static str = "127.0.0.1";
+
+/// default binding port.
+pub(crate) const DEFAULT_PORT: u16 = 9900;
+
+/// default serving directory.
+pub(crate) const DEFAULT_ROOT_PATH: &'static str = ".";
 
 /// Simple cli http server for static files
 #[derive(Debug, Parser, Deserialize)]
@@ -107,14 +116,22 @@ impl Config {
         format!(r###"
         Configuration:
             {{
-                host: {:?},
-                port: {:?},
-                config: {:?},
-                root: {:?},
+                host: {},
+                port: {},
+                config: {},
+                root: {},
                 graceful_shutdown: {},
                 tls: {},
                 quiet: {},
             }}
-        "###, self.host, self.port, self.config, self.root, self.graceful_shutdown, self.tls, self.quiet)
+        "###,
+                self.host.as_ref().unwrap_or(&DEFAULT_HOST.to_string()),
+                self.port.unwrap_or(DEFAULT_PORT),
+                self.config.as_ref().unwrap_or(&OsString::from("-")).to_str().unwrap(),
+                self.root.as_ref().unwrap_or(&OsString::from(".")).to_str().unwrap(),
+                self.graceful_shutdown,
+                self.tls,
+                self.quiet
+        )
     }
 }
