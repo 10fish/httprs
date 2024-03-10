@@ -37,8 +37,13 @@ cargo install httprs
     - [x] Silent Mode
     - [ ] Logging Level
     - [ ] Logging Output into File
-- [ ] File Type Support
-    - [ ] Generic File Type Supporting: image/text/video/binary
+- [ ] File Browser Support
+    - [x] Generic File Type Supporting: image/text/video/binary
+    - [ ] File Metadata Details
+      - [x] File Size
+      - [x] Last Modified
+      - [ ] More if Necessary
+    - [ ] File List Ordering
     - [ ] Content-Type Customization
 - [ ] Multiplatform Support
     - [x] macOS
@@ -48,10 +53,10 @@ cargo install httprs
 - [ ] Partial Request/Response Support
     - [ ] `If-Range` REQUEST Header
     - [ ] `If-Match` REQUEST Header
-    - [ ] `Range` REQUEST Header
-    - [ ] `Accept-Ranges` RESPONSE Header
-    - [ ] `Content-Range` RESPONSE Header
-    - [ ] CODE `206` - Partial Content
+    - [x] `Range` REQUEST Header: when file size exceeds 50MB
+    - [x] `Accept-Ranges` RESPONSE Header
+    - [x] `Content-Range` RESPONSE Header
+    - [x] CODE `206` - Partial Content
     - [ ] CODE `416` - Range Not Satisfiable
 - [ ] CORS Support
 - [ ] Transmission Compression
