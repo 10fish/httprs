@@ -1,6 +1,6 @@
 # httprs
 
-[![License (MIT)](https://img.shields.io/crates/l/httprs)](https://github.com/10fish/httprs/blob/main/LICENSE)
+[![License (MIT)](https://img.shields.io/crates/l/httprs)](https://github.com/10fish/httprs/blob/main/LICENSE.txt)
 [![CI Status](https://github.com/10fish/httprs/actions/workflows/ci.yml/badge.svg)](https://github.com/10fish/httprs/actions/workflows/ci.yml)
 [![Audit](https://github.com/10fish/httprs/actions/workflows/audit.yml/badge.svg)](https://github.com/10fish/httprs/actions/workflows/audit.yml)
 [![Dependency status](https://deps.rs/repo/github/10fish/httprs/status.svg)](https://deps.rs/repo/github/10fish/httprs)
