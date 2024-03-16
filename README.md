@@ -48,7 +48,7 @@ cargo install httprs
 - [ ] Multiplatform Support
     - [x] macOS
     - [x] Linux
-    - [ ] Windows
+    - [x] Windows
 - [ ] HTTP Encryption
 - [ ] Partial Request/Response Support
     - [ ] `If-Range` REQUEST Header

@@ -35,7 +35,7 @@ pub struct Config {
     #[arg(short = 'H', long)]
     pub host: Option<String>,
 
-    /// default binding port [default: 9000]
+    /// default binding port [default: 9900]
     #[arg(short = 'P', long)]
     pub port: Option<u16>,
 
