@@ -70,6 +70,11 @@ cargo install httprs
 ### How to contribute
 Any advice is welcomed and feel free to make a fork and push your own code.
 
+### Acknowledgements
+Thanks to those who are inspiring me, supporting me, providing me with ideas, advice, solutions, and all users who bear much using this.
+- [http-server-rs/http-server](https://github.com/http-server-rs/http-server) for initial thoughts.
+- [egmkang/local_ipaddress](https://github.com/egmkang/local_ipaddress) for resolving intranet binding IP addresses.
+
 ### Licenses
 
 MIT License
