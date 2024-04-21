@@ -24,7 +24,7 @@ pub(crate) const DEFAULT_ROOT_PATH: &'static str = ".";
 
 /// Simple cli http server for static files
 #[derive(Debug, Parser, Deserialize)]
-#[command(name = "httprs", author = "10fish", version = "0.2.2")]
+#[command(name = "httprs", author = "10fish", version = "0.2.3")]
 #[command(version, about, long_about = None, after_long_help = "./after-help.md")]
 pub struct Config {
     /// path of toml config file
