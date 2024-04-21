@@ -3,8 +3,9 @@ use std::{
     error::Error,
     path::PathBuf,
     ffi::OsString,
-    time::Duration
 };
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use colored::Colorize;
 use hyper::{
     server::conn::http1,
@@ -15,21 +16,21 @@ use tokio::{
     net::TcpListener,
     signal::ctrl_c,
     sync::broadcast::{channel, Receiver, Sender},
-    time::sleep
 };
+use tokio::sync::Mutex;
 use tracing::{debug, error, info};
 use crate::cli::{DEFAULT_HOST, DEFAULT_PORT, DEFAULT_ROOT_PATH};
 use super::{
     cli::{Config, ROOT_PATH_KEY},
     http::{file_service, local_address},
-    VERSION_STRING
+    VERSION_STRING,
 };
 
 pub struct Server {
     config: Config,
     listener: Option<TcpListener>,
     notifier: Sender<()>,
-    shutdown: Shutdown,
+    shutdown: Arc<Mutex<Shutdown>>,
 }
 
 impl Server {
@@ -41,7 +42,7 @@ impl Server {
                     config,
                     listener: None,
                     notifier,
-                    shutdown: Shutdown::new(receiver),
+                    shutdown: Arc::new(Mutex::new(Shutdown::new(receiver))),
                 }
             }
             Err(err) => {
@@ -50,7 +51,7 @@ impl Server {
         }
     }
 
-    pub async fn run(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+    pub async fn run(mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.setup_logging();
 
         let default_host = DEFAULT_HOST.to_string();
@@ -90,40 +91,45 @@ impl Server {
                 }
 
                 if self.config.graceful_shutdown {
+                    // with graceful shutdown
+                    tokio::spawn(async move {
+                        ctrl_c().await.unwrap();
+                        debug!("ctrl_c signal received, finishing up...");
+                        self.notifier.send(()).unwrap();
+                    });
+                    let shutdown = self.shutdown.clone();
                     tokio::select! {
-                    _ = async {
-                        loop {
-                            let (tcp, _) = self.listener.as_ref().unwrap().accept().await.unwrap();
+                        _ = async move {
+                            let mut lock = shutdown.lock().await;
+                            lock.recv().await;
+                            drop(lock);
+                            debug!("shutdown signal received...");
+                        } => {
+                            // TODO: shutdown hook
+                            info!("cleaning up...");
+                        },
 
-                            tokio::select! {
-                                _ = async move {
+                        _ = async move {
+                            loop {
+                                let (tcp, _) = self.listener.as_ref().unwrap().accept().await.unwrap();
+
                                 if let Err(err) = http1::Builder::new()
                                     .serve_connection(TokioIo::new(tcp), service_fn(file_service))
                                     .await
-                                    {
-                                        error!("Error serving connection: {:?}", err);
-                                    }
-                                } => {},
-                                _ = self.shutdown.recv() => {
-                                    info!("shutdown signal received...");
+                                {
+                                    error!("Error serving connection: {:?}", err);
+                                }
+                                if self.shutdown.lock().await.in_shutdown() {
+                                    break;
                                 }
                             }
-                            // if self.shutdown.in_shutdown() {
-                            //     break;
-                            // }
-                        }
-                    } => {},
-                    _ = ctrl_c() => {
-                        info!("received ctrl_c signal, exiting...");
-                        self.notifier.send(()).unwrap();
-                        let _ = sleep(Duration::from_secs(5)).await;
+                        } => {},
                     }
-                }
                 } else {
                     // without graceful shutdown
                     loop {
                         let (tcp, _) = self.listener.as_ref().unwrap().accept().await?;
-                        tokio::task::spawn(async move {
+                        tokio::spawn(async move {
                             if let Err(err) = http1::Builder::new()
                                 .serve_connection(TokioIo::new(tcp), service_fn(file_service))
                                 .await
@@ -158,7 +164,7 @@ impl Server {
 }
 
 struct Shutdown {
-    in_shutdown: bool,
+    in_shutdown: Arc<AtomicBool>,
     notify: Receiver<()>,
 }
 
@@ -166,23 +172,24 @@ impl Shutdown {
     /// Create a new `Shutdown` backed by the given `Receiver<_>`.
     pub(crate) fn new(notify: Receiver<()>) -> Self {
         Self {
-            in_shutdown: false,
+            in_shutdown: Arc::new(AtomicBool::new(false)),
             notify,
         }
     }
 
     /// indicates if in shutdown process or not
     pub(crate) fn in_shutdown(&self) -> bool {
-        self.in_shutdown
+        self.in_shutdown.load(Ordering::SeqCst)
     }
 
     // Receive the shutdown notice, waiting if necessary.
     pub(crate) async fn recv(&mut self) {
-        if self.in_shutdown {
+        if self.in_shutdown.load(Ordering::SeqCst) {
+            debug!("service is already in closing phase...");
             return;
         }
 
         let _ = self.notify.recv().await;
-        self.in_shutdown = true;
+        self.in_shutdown.store(true, Ordering::SeqCst);
     }
 }
