@@ -699,7 +699,7 @@ fn infallible(error: std::io::Error) -> Infallible {
 mod tests {
     use super::*;
 
-    const test_file_size: u64 = 2560000;
+    const TEST_FILE_SIZE: u64 = 2560000;
 
     #[test]
     fn should_get_local_address() {
@@ -727,7 +727,7 @@ mod tests {
                 .replace("{{label}}", label)
                 .as_str();
         }
-        let mut expected = String::from(BREADCRUMBS_TEMPLATE)
+        let expected = String::from(BREADCRUMBS_TEMPLATE)
             .replace("{{items}}", items.as_str());
 
         // remove all spaces to compare
@@ -804,13 +804,13 @@ mod tests {
         ];
         let mut expected = Range::new();
         expected.combined = true;
-        expected.filesize = Some(test_file_size);
+        expected.filesize = Some(TEST_FILE_SIZE);
         expected.segments = vec![
             Segment::Regional(8, 512),
-            Segment::Regional(1024, test_file_size - 1),
+            Segment::Regional(1024, TEST_FILE_SIZE - 1),
         ];
 
-        range.adjust(test_file_size).combine_all();
+        range.adjust(TEST_FILE_SIZE).combine_all();
 
         assert_eq!(range, expected, "ranges should be combined and not overlapping");
     }
@@ -824,12 +824,12 @@ mod tests {
         ];
         let mut expected = Range::new();
         expected.combined = true;
-        expected.filesize = Some(test_file_size);
+        expected.filesize = Some(TEST_FILE_SIZE);
         expected.segments = vec![
-            Segment::Regional(512, test_file_size - 1),
+            Segment::Regional(512, TEST_FILE_SIZE - 1),
         ];
 
-        range.adjust(test_file_size).combine_all();
+        range.adjust(TEST_FILE_SIZE).combine_all();
 
         assert_eq!(range, expected, "ranges should be combined and not overlapping");
     }
@@ -847,22 +847,22 @@ mod tests {
         ];
         let mut expected = Range::new();
         expected.combined = true;
-        expected.filesize = Some(test_file_size);
+        expected.filesize = Some(TEST_FILE_SIZE);
         expected.segments = vec![
             Segment::Regional(512, 1024),
             Segment::Regional(2048, 5120),
             Segment::Regional(6172, 8192),
-            Segment::Regional(10240, test_file_size - 1),
+            Segment::Regional(10240, TEST_FILE_SIZE - 1),
         ];
 
-        range.adjust(test_file_size).combine_all();
+        range.adjust(TEST_FILE_SIZE).combine_all();
 
         assert_eq!(range, expected, "ranges should be combined and not overlapping");
     }
 
     #[tokio::test]
     async fn bytes_stream_async_read() {
-        let text = "this is line 1\nthis is line 2\nthis is line 3";
+        // let text = "this is line 1\nthis is line 2\nthis is line 3";
         // let mut stream = BytesStream(text.as_bytes().to_vec());
         //
         // let mut buf = Vec::new();

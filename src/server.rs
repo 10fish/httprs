@@ -64,7 +64,8 @@ impl Server {
         debug!("Serving with configuration: {}", self.config.display());
 
         let binding_addr = format!("{}:{}", host, port);
-        let protocol = if self.config.tls { "HTTPS" } else { "HTTP" };
+        let protocol = if self.config
+            .protocol.is_some_and(|v| v.secure) { "HTTPS" } else { "HTTP" };
 
         match TcpListener::bind(binding_addr.clone()).await {
             Ok(listener) => {

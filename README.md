@@ -30,6 +30,17 @@ or install with `cargo` in terminal:
 ```shell
 cargo install httprs
 ```
+
+### Usage
+```shell
+# help
+httprs --help
+# run in insecure mode
+httprs -H 0.0.0.0 -P 10000
+# run in secure mode
+httprs --secure --cert /path/to/cert
+```
+
 ### Roadmap
 
 - [ ] Logging
