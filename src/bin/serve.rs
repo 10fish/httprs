@@ -1,8 +1,8 @@
 use std::error::Error;
 use clap::Parser;
 use httprs::{
-    conf::Configuration,
-    server::Server
+    Configuration,
+    Server,
 };
 
 #[tokio::main]

@@ -78,9 +78,10 @@ impl Server {
                     "Serving {} on: {}",
                     protocol_colored,
                     format!(
-                        "{}://{}",
+                        "{}://{}:{}",
                         protocol,
-                        self.listener.as_ref().unwrap().local_addr().unwrap().ip()
+                        self.listener.as_ref().unwrap().local_addr().unwrap().ip(),
+                        port
                     ).green()
                 );
                 if host == "0.0.0.0" {

@@ -7,7 +7,7 @@ use std::{
     cmp::{max, min},
     io::{Read, Seek, SeekFrom},
     pin::Pin,
-    task::{Context, Poll}
+    task::{Context, Poll},
 };
 use bytes::Bytes;
 use chrono::{DateTime, Local};
@@ -16,7 +16,7 @@ use futures_util::TryStreamExt;
 use http_body_util::{
     BodyExt,
     StreamBody,
-    combinators::BoxBody
+    combinators::BoxBody,
 };
 use hyper::{
     header,
@@ -31,33 +31,19 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use tokio::{
     fs::File,
-    io::{AsyncRead, ReadBuf}
+    io::{AsyncRead, ReadBuf},
 };
 use tokio_util::io::ReaderStream;
 use tracing::{debug, Level, trace, warn};
 use urlencoding::decode;
 use walkdir::WalkDir;
-use crate::VERSION_STRING;
+use crate::{
+    MIME_TYPES,
+    DEFAULT_MIME_TYPE,
+    VERSION_STRING
+};
 
-const HTML_TEMPLATE: &'static str = r###"
-<!doctype html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport"
-          content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0">
-    <meta http-equiv="X-UA-Compatible" content="ie=edge">
-    <title>{{title}}</title>
-</head>
-<body>
-    {{header}}
-    <hr>
-    {{body}}
-    <hr>
-    <p style="text-align: center;"><i>Powered by {{version}} © 2024</i></p>
-</body>
-</html>
-"###;
+const HTML_TEMPLATE: &'static str = include_str!("../static/index.html");
 
 const FILE_LIST_TABLE_TEMPLATE: &'static str = r###"
 <table style="margin-left: 1em">
@@ -219,46 +205,7 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
                 .body(BoxBody::new(response_body)).unwrap())
         } else {
             // Resolve file extension to HTTP Content-Type
-            let content_type = match path.rsplit_once('.') {
-                Some((_, ext)) => {
-                    match ext.to_lowercase().as_str() {
-                        // text
-                        "css" => "text/css; charset=utf8",
-                        "js" => "text/javascript; charset=utf8",
-                        "html" | "htm" | "xhtml" | "xml" => "text/html; charset=utf8",
-                        "csv" | "txt" | "text" | "md" | "json" | "toml" | "cfg" | "config" | "yaml" | "yml" => {
-                            "text/plain; charset=utf8"
-                        }
-                        // documents
-                        "pdf" => "application/pdf",
-                        // image
-                        "gif" => "image/gif",
-                        "jpeg" | "jpg" => "image/jpeg",
-                        "png" => "image/png",
-                        "tiff" => "image/tiff",
-                        "ico" => "image/vnd.microsoft.icon",
-                        // TODO: confirmation
-                        "icon" => "image/x-icon",
-                        "djvu" => "image/vnd.djvu",
-                        "svg" => "image/svg+xml",
-                        // audio
-                        // "mpeg" => "video/mpeg",
-                        "wma" => "audio/x-ms-wma",
-                        "wav" => "audio/x-wav",
-                        "mp3" => "audio/x-wav",
-                        "flac" => "audio/x-wav",
-                        // video
-                        "mpeg" => "video/mpeg",
-                        "mp4" => "video/mp4",
-                        "mov" => "video/quicktime",
-                        "wmv" => "video/x-ms-wmv",
-                        "flv" => "video/x-flv",
-                        "webm" => "video/webm",
-                        _ => "application/octet-stream"
-                    }
-                }
-                _ => "application/octet-stream"
-            };
+            let content_type = resolve_content_type(Box::new(path));
             let decoded_path = decode(full_path.to_str().unwrap()).unwrap().to_string();
             let file = File::open(decoded_path).await.expect("read file error");
             let file_size = get_size_bytes(&file).await;
@@ -345,6 +292,15 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
             .status(StatusCode::NOT_FOUND)
             .body(response_body.boxed()).unwrap())
     }
+}
+
+fn resolve_content_type(path: Box<&str>) -> &'static str {
+    if let Some((_, ext)) = path.rsplit_once('.') {
+        if let Some(mime) = MIME_TYPES.get(ext) {
+            return mime;
+        }
+    }
+    DEFAULT_MIME_TYPE
 }
 
 async fn read_segment(path: &Path, seg: &Segment) -> (FileSegment, u64, HeaderValue) {
