@@ -1,6 +1,6 @@
 use lazy_static::lazy_static;
 
-pub mod cli;
+pub mod conf;
 mod http;
 pub mod server;
 

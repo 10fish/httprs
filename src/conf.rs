@@ -17,18 +17,18 @@ pub(crate) const DEFAULT_PORT: u16 = 9900;
 pub(crate) const DEFAULT_ROOT_PATH: &'static str = ".";
 
 #[derive(Debug, Clone, Eq, PartialEq, Args, Deserialize)]
-pub struct Protocol {
-    /// whether to enable https mode, that data transfer between server to clients will use encryption
-    #[arg(long, requires = "cert")]
+pub struct Secure {
+    /// enable https mode, adds an TLS layer for data transfer between server and clients
+    #[arg(long, requires = "cert", requires = "key")]
     pub secure: bool,
 
-    /// whether https use SSL encryption, by default use TLS
-    #[arg(long)]
-    pub ssl: bool,
-
-    /// cert to be used for encryption with https mode
+    /// cert file path for server in https mode
     #[arg(long)]
     pub cert: Option<OsString>,
+
+    /// private key file path for server in https mode
+    #[arg(long)]
+    pub key: Option<OsString>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Default, ValueEnum, Deserialize)]
@@ -41,56 +41,55 @@ pub enum Compression {
     Other,
 }
 
-/// Simple cli http server for static files
-#[derive(Debug, Parser, Deserialize)]
+#[derive(Debug, Clone, Parser, Deserialize)]
 #[command(name = "httprs", author = "10fish", version = "0.2.3")]
 #[command(version, about, long_about = None, after_long_help = "./after-help.md")]
-pub struct Config {
-    /// path of toml config file
+pub struct Configuration {
+    /// Path of configuration file.
     #[arg(short, long)]
     pub config: Option<OsString>,
 
-    /// default binding host
+    /// Binding IP address of server.
     #[arg(short = 'H', long, default_value = "127.0.0.1")]
     pub host: Option<String>,
 
-    /// default binding port
+    /// Binding port of service.
     #[arg(short = 'P', long, default_value = "9900")]
     pub port: Option<u16>,
 
-    /// the directory where serve from
+    /// Base directory, default to current directory where service starts.
     #[arg(default_value = ".")]
     pub root: Option<OsString>,
 
-    /// Enable Cross-Origin Resource Sharing allowing any origin
+    /// Enable Cross-Origin Resource Sharing allowing any origin.
     #[arg(long)]
     pub cors: bool,
 
-    /// Waits for all requests to fulfill before shutting down the server
+    /// Enable gracefully shutting down the running server.
     #[arg(short, long)]
     pub graceful_shutdown: bool,
 
-    /// default binding port [default: http]
+    /// Enable data transmission security between server and clients(HTTPS/TLS).
     #[command(flatten)]
-    pub protocol: Option<Protocol>,
+    pub secure: Option<Secure>,
 
-    /// Enable compression for HTTP(S) data transfers
+    /// Enable data compression between server and clients.
     #[arg(short = 'C', long, default_value = "none")]
     pub compression: Compression,
 
-    /// Enables quiet mode
+    /// Enable server run in silent mode
     #[arg(short, long)]
     pub quiet: bool,
 }
 
-impl Config {
+impl Configuration {
     pub async fn merged(self) -> Result<Self, Box<dyn Error>> {
         if let Some(config_file) = &self.config {
             match File::open(config_file).await {
                 Ok(mut file) => {
                     let mut content = String::new();
                     let _res = file.read_to_string(&mut content).await;
-                    let result = toml::from_str::<Config>(content.as_str());
+                    let result = toml::from_str::<Configuration>(content.as_str());
                     match result {
                         // merge parameters from cmd(with higher priorities) to that from file
                         Ok(config) => {
@@ -120,7 +119,7 @@ impl Config {
         }
     }
 
-    fn merge_from(self, config: Config) -> Config {
+    fn merge_from(self, config: Configuration) -> Configuration {
         let mut conf = config;
         if self.host.is_some() {
             conf.host = self.host;
@@ -133,7 +132,7 @@ impl Config {
         }
         conf.config = self.config;
         conf.quiet |= self.quiet;
-        conf.protocol = self.protocol;
+        conf.secure = self.secure;
         conf.graceful_shutdown |= self.graceful_shutdown;
         conf
     }
@@ -150,7 +149,7 @@ impl Config {
                 cors: {},
                 compression: {:?},
                 graceful_shutdown: {},
-                protocol: {},
+                secure: {},
                 quiet: {},
             }}
         "###,
@@ -174,13 +173,9 @@ impl Config {
         )
     }
 
-    fn protocol(&self) -> &'static str {
-        if let Some(p) = self.protocol.as_ref() {
-            if p.ssl {
-                "https[ssl]"
-            } else {
-                "https[tls]"
-            }
+    pub(crate) fn protocol(&self) -> &'static str {
+        if self.secure.is_some() {
+            "https"
         } else {
             "http"
         }
@@ -192,18 +187,20 @@ impl Config {
 mod test {
     use std::ffi::OsString;
     use std::str::FromStr;
+    use clap::error::ErrorKind::MissingRequiredArgument;
     use clap::Parser;
-    use crate::cli::{Compression, Config, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_ROOT_PATH};
+    use crate::conf::{Compression, Configuration, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_ROOT_PATH};
+    use regex::Regex;
 
     #[test]
     fn should_run_with_defaults() {
-        let config = Config::parse_from([""]);
+        let config = Configuration::parse_from([""]);
         assert_eq!(config.config, None);
         assert_eq!(config.host, Some(DEFAULT_HOST.to_string()));
         assert_eq!(config.port, Some(DEFAULT_PORT));
         assert_eq!(config.root, Some(OsString::from_str(DEFAULT_ROOT_PATH).unwrap()));
         assert_eq!(config.compression, Compression::None);
-        assert_eq!(config.protocol, None);
+        assert_eq!(config.secure, None);
         assert_eq!(config.graceful_shutdown, false);
         assert_eq!(config.cors, false);
         assert_eq!(config.quiet, false);
@@ -212,69 +209,99 @@ mod test {
     /// must add "--" because tests run by cargo
     #[test]
     fn should_set_host() {
-        let config = Config::parse_from(["--", "-H", "192.168.1.1"]);
+        let config = Configuration::parse_from(["--", "-H", "192.168.1.1"]);
         assert_eq!(config.host, Some("192.168.1.1".to_string()));
     }
 
     #[test]
     fn should_set_port() {
-        let config = Config::parse_from(["--", "-P", "3000"]);
+        let config = Configuration::parse_from(["--", "-P", "3000"]);
         assert_eq!(config.port, Some(3000));
     }
 
     #[test]
-    fn should_https_requires_cert() {
-        let result = Config::try_parse_from(["--", "--secure"]);
-        assert!(result.is_err());
-        assert!(result.err().unwrap().to_string().contains("--cert <CERT>"));
+    fn should_complain_https_missing_key_and_cert() {
+        let result = Configuration::try_parse_from(["--", "--secure"]);
+        assert_eq!(result.as_ref().err().unwrap().kind(), MissingRequiredArgument);
+        let error_string = result.as_ref().err().unwrap().to_string();
+        // Usage prompt will print full args required
+        let error_hint = Regex::new(r"Usage:.*").unwrap().replace_all(&error_string, "");
+        // println!("{}", error_hint);
+        assert!(error_hint.contains("--cert <CERT>"));
+        assert!(error_hint.contains("--key <KEY>"));
     }
 
     #[test]
-    fn should_https_run_with_cert() {
-        let config = Config::parse_from(["--", "--secure", "--cert", "https.cert"]);
-        assert!(config.protocol.is_some());
-        assert_eq!(config.protocol.as_ref().unwrap().secure, true);
-        assert_eq!(config.protocol.as_ref().unwrap().ssl, false);
-        assert_eq!(config.protocol.as_ref().unwrap().cert, Some(OsString::from_str("https.cert").unwrap()));
+    fn should_complain_https_missing_key() {
+        let result = Configuration::try_parse_from(["--", "--secure", "--cert", "server.pem"]);
+        assert_eq!(result.as_ref().err().unwrap().kind(), MissingRequiredArgument);
+        let error_string = result.as_ref().err().unwrap().to_string();
+        // Usage prompt will print full args required
+        let error_hint = Regex::new(r"Usage:.*").unwrap().replace_all(&error_string, "");
+        // println!("{}", error_hint);
+        assert!(!error_hint.contains("--cert <CERT>"));
+        assert!(error_hint.contains("--key <KEY>"));
     }
 
     #[test]
-    fn should_https_run_with_cert_ssl() {
-        let config = Config::parse_from(["--", "--secure", "--cert", "https.cert", "--ssl"]);
-        assert!(config.protocol.is_some());
-        assert_eq!(config.protocol.as_ref().unwrap().secure, true);
-        assert_eq!(config.protocol.as_ref().unwrap().ssl, true);
-        assert_eq!(config.protocol.as_ref().unwrap().cert, Some(OsString::from_str("https.cert").unwrap()));
+    fn should_complain_https_missing_cert() {
+        let result = Configuration::try_parse_from(["--", "--secure", "--key", "key.pem"]);
+        assert_eq!(result.as_ref().err().unwrap().kind(), MissingRequiredArgument);
+        let error_string = result.as_ref().err().unwrap().to_string();
+        // Usage prompt will print full args required
+        let error_hint = Regex::new(r"Usage:.*").unwrap().replace_all(&error_string, "");
+        // println!("{}", error_hint);
+        assert!(error_hint.contains("--cert <CERT>"));
+        assert!(!error_hint.contains("--key <KEY>"));
     }
+
+    #[test]
+    fn should_https_run_with_cert_and_key() {
+        let config = Configuration::parse_from(["--", "--secure", "--cert", "server.pem", "--key", "key.pem"]);
+        assert!(config.secure.is_some());
+        assert_eq!(config.secure.as_ref().unwrap().secure, true);
+        assert_eq!(config.secure.as_ref().unwrap().cert, Some(OsString::from_str("server.pem").unwrap()));
+        assert_eq!(config.secure.as_ref().unwrap().key, Some(OsString::from_str("key.pem").unwrap()));
+    }
+
+    // TODO: test conditional parsing
+    // #[test]
+    // fn should_ignore_cert_or_key_when_https_not_enabled() {
+    //     let config = Configuration::parse_from(["--", "--cert", "server.pem", "--key", "key.pem"]);
+    //     assert!(config.secure.is_some());
+    //     assert_eq!(config.secure.as_ref().unwrap().secure, false);
+    //     assert_eq!(config.secure.as_ref().unwrap().cert, None);
+    //     assert_eq!(config.secure.as_ref().unwrap().key, None);
+    // }
 
     #[test]
     fn should_set_compression_gzip() {
-        let config = Config::parse_from(["--", "-C", "gzip"]);
+        let config = Configuration::parse_from(["--", "-C", "gzip"]);
         assert_eq!(config.compression, Compression::Gzip);
     }
 
     #[test]
     fn should_set_compression_deflate() {
-        let config = Config::parse_from(["--", "-C", "deflate"]);
+        let config = Configuration::parse_from(["--", "-C", "deflate"]);
         assert_eq!(config.compression, Compression::Deflate);
     }
 
     #[test]
     fn should_not_set_compression_unknown() {
-        let result = Config::try_parse_from(["--", "-C", "unknown"]);
+        let result = Configuration::try_parse_from(["--", "-C", "unknown"]);
         assert!(result.is_err());
         assert!(result.err().unwrap().to_string().contains("unknown"));
     }
 
     #[test]
     fn should_set_cors() {
-        let config = Config::parse_from(["--", "--cors"]);
+        let config = Configuration::parse_from(["--", "--cors"]);
         assert_eq!(config.cors, true);
     }
 
     #[test]
     fn should_set_graceful_shutdown() {
-        let config = Config::parse_from(["--", "--graceful-shutdown"]);
+        let config = Configuration::parse_from(["--", "--graceful-shutdown"]);
         assert_eq!(config.graceful_shutdown, true);
     }
 }

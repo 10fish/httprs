@@ -162,7 +162,7 @@ struct MultipartByteRanges {
 pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible> {
     let timer = SystemTime::now();
     let path = request.uri().path();
-    let root = env::var(super::cli::ROOT_PATH_KEY).expect("environment variable HTTPRS_ROOT not set!");
+    let root = env::var(super::conf::ROOT_PATH_KEY).expect("environment variable HTTPRS_ROOT not set!");
     let root_path = PathBuf::from(root);
     // strip the prefix of '/' because path join will get to system root if not
     let full_path = root_path.join(decode(path).unwrap().strip_prefix("/").unwrap());
@@ -394,6 +394,7 @@ fn log_request(request: &Request<Incoming>, time: u128, status_code: StatusCode)
 }
 
 
+#[allow(dead_code)]
 impl Range {
     fn new() -> Self {
         Self {

@@ -19,29 +19,31 @@ use tokio::{
 };
 use tokio::sync::Mutex;
 use tracing::{debug, error, info};
-use crate::cli::{DEFAULT_HOST, DEFAULT_PORT, DEFAULT_ROOT_PATH};
+use crate::conf::{DEFAULT_HOST, DEFAULT_PORT, DEFAULT_ROOT_PATH};
 use super::{
-    cli::{Config, ROOT_PATH_KEY},
+    conf::{Configuration, ROOT_PATH_KEY},
     http::{file_service, local_address},
     VERSION_STRING,
 };
 
+/// Simple http(s) server for static files
 pub struct Server {
-    config: Config,
     listener: Option<TcpListener>,
     notifier: Sender<()>,
+    /// The parsed server configuration
+    pub configuration: Arc<Configuration>,
     shutdown: Arc<Mutex<Shutdown>>,
 }
 
 impl Server {
-    pub async fn new(config: Config) -> Self {
-        match config.merged().await {
-            Ok(config) => {
+    pub async fn new(conf: Configuration) -> Self {
+        match conf.merged().await {
+            Ok(conf) => {
                 let (notifier, receiver) = channel(1);
                 Server {
-                    config,
                     listener: None,
                     notifier,
+                    configuration: Arc::new(conf),
                     shutdown: Arc::new(Mutex::new(Shutdown::new(receiver))),
                 }
             }
@@ -55,43 +57,43 @@ impl Server {
         self.setup_logging();
 
         let default_host = DEFAULT_HOST.to_string();
-        let host = self.config.host.as_ref().unwrap_or(&default_host);
-        let port = self.config.port.unwrap_or(DEFAULT_PORT);
+        let host = self.configuration.host.as_ref().unwrap_or(&default_host);
+        let port = self.configuration.port.unwrap_or(DEFAULT_PORT);
         let default_root: OsString = PathBuf::from(DEFAULT_ROOT_PATH).into();
-        let root_path = self.config.root.as_ref().unwrap_or(&default_root);
+        let root_path = self.configuration.root.as_ref().unwrap_or(&default_root);
         env::set_var(ROOT_PATH_KEY, PathBuf::from(&root_path).as_path());
         debug!("Setting ROOT_PATH environment variable to {}", root_path.to_str().unwrap());
-        debug!("Serving with configuration: {}", self.config.display());
+        debug!("Serving with configuration: {}", self.configuration.display());
 
         let binding_addr = format!("{}:{}", host, port);
-        let protocol = if self.config
-            .protocol.is_some_and(|v| v.secure) { "HTTPS" } else { "HTTP" };
+        let protocol = self.configuration.protocol();
 
         match TcpListener::bind(binding_addr.clone()).await {
             Ok(listener) => {
                 self.listener = Some(listener);
+                let protocol_colored = protocol.to_uppercase().green();
                 info!("Server {} started.",VERSION_STRING.bright_blue());
                 // TODO: simplify printing
                 info!(
                     "Serving {} on: {}",
-                    protocol.green(),
+                    protocol_colored,
                     format!(
                         "{}://{}",
-                        protocol.to_lowercase(),
-                        self.listener.as_ref().unwrap().local_addr().unwrap()
+                        protocol,
+                        self.listener.as_ref().unwrap().local_addr().unwrap().ip()
                     ).green()
                 );
                 if host == "0.0.0.0" {
                     if let Some(ip) = local_address() {
                         info!(
                             "Local Network {} on: {}",
-                            protocol.green(),
-                            format!("{}://{}:{}", protocol.to_lowercase(), ip, port).green()
+                            protocol_colored,
+                            format!("{}://{}:{}", protocol, ip, port).green()
                         );
                     }
                 }
 
-                if self.config.graceful_shutdown {
+                if self.configuration.graceful_shutdown {
                     // with graceful shutdown
                     tokio::spawn(async move {
                         ctrl_c().await.unwrap();
@@ -150,7 +152,7 @@ impl Server {
     }
 
     fn setup_logging(&self) {
-        let level = if self.config.quiet {
+        let level = if self.configuration.quiet {
             tracing::Level::WARN
         } else {
             tracing::Level::DEBUG
