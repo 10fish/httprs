@@ -22,6 +22,7 @@ the main features are as followings, and certainly more will be added:
 - multi-platform support
 - multiple MIME support
 - colored logs
+- partial content support
 
 ### Installation
 Download pre-built binaries from [release](https://github.com/10fish/httprs/releases) page.
@@ -33,12 +34,16 @@ cargo install httprs
 
 ### Usage
 ```shell
-# help
-httprs --help
+# quick start, running on http://127.0.0.1:9900
+httprs
 # run in insecure mode
 httprs -H 0.0.0.0 -P 10000
 # run in secure mode
-httprs --secure --cert /path/to/cert
+httprs --secure --key /path/to/keyfile --cert /path/to/certfile
+# run with graceful shutdown
+httprs --graceful-shutdown
+# help for more details
+httprs --help
 ```
 
 ### Roadmap
@@ -60,7 +65,7 @@ httprs --secure --cert /path/to/cert
     - [x] macOS
     - [x] Linux
     - [x] Windows
-- [ ] HTTP Encryption
+- [x] HTTPS/TLS Transmission Encryption
 - [ ] Partial Request/Response Support
     - [ ] `If-Range` REQUEST Header
     - [ ] `If-Match` REQUEST Header
