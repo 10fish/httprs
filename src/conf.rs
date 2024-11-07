@@ -1,20 +1,12 @@
 use clap::{Args, Parser, ValueEnum};
 use serde::Deserialize;
-use std::{error::Error, ffi::OsString};
+use std::{env, error::Error, ffi::OsString};
+use std::path::PathBuf;
 use tokio::{fs::File, io::AsyncReadExt};
-use tracing::error;
+use tracing::{debug, error};
 
 /// global environment variable for serving root directory. default to current directory [.]
 pub(crate) const ROOT_PATH_KEY: &'static str = "HTTPRS_ROOT";
-
-/// default binding host.
-pub(crate) const DEFAULT_HOST: &'static str = "127.0.0.1";
-
-/// default binding port.
-pub(crate) const DEFAULT_PORT: u16 = 9900;
-
-/// default serving directory.
-pub(crate) const DEFAULT_ROOT_PATH: &'static str = ".";
 
 #[derive(Debug, Clone, Eq, PartialEq, Args, Deserialize)]
 pub struct Secure {
@@ -83,7 +75,7 @@ pub struct Configuration {
 }
 
 impl Configuration {
-    pub async fn merged(self) -> Result<Self, Box<dyn Error>> {
+    pub async fn init(self) -> Result<Self, Box<dyn Error>> {
         if let Some(config_file) = &self.config {
             match File::open(config_file).await {
                 Ok(mut file) => {
@@ -94,6 +86,7 @@ impl Configuration {
                         // merge parameters from cmd(with higher priorities) to that from file
                         Ok(config) => {
                             let conf = self.merge_from(config);
+                            conf.set_env();
                             Ok(conf)
                         }
                         Err(err) => {
@@ -115,6 +108,7 @@ impl Configuration {
                 }
             }
         } else {
+            self.set_env();
             Ok(self)
         }
     }
@@ -153,18 +147,14 @@ impl Configuration {
                 quiet: {},
             }}
         "###,
-            self.host.as_ref().unwrap_or(&DEFAULT_HOST.to_string()),
-            self.port.unwrap_or(DEFAULT_PORT),
+            self.host.as_ref().unwrap(),
+            self.port.as_ref().unwrap(),
             self.config
                 .as_ref()
                 .unwrap_or(&OsString::from("-"))
                 .to_str()
                 .unwrap(),
-            self.root
-                .as_ref()
-                .unwrap_or(&OsString::from("."))
-                .to_str()
-                .unwrap(),
+            self.root.as_ref().unwrap().to_str().unwrap(),
             self.cors,
             self.compression,
             self.graceful_shutdown,
@@ -180,6 +170,12 @@ impl Configuration {
             "http"
         }
     }
+
+    pub(crate) fn set_env(&self) {
+        let root_path = self.root.as_ref().unwrap();
+        env::set_var(ROOT_PATH_KEY, PathBuf::from(&root_path).as_path());
+        debug!("Setting ROOT_PATH environment variable to {}", root_path.to_str().unwrap());
+    }
 }
 
 
@@ -189,8 +185,17 @@ mod test {
     use std::str::FromStr;
     use clap::error::ErrorKind::MissingRequiredArgument;
     use clap::Parser;
-    use crate::conf::{Compression, Configuration, DEFAULT_HOST, DEFAULT_PORT, DEFAULT_ROOT_PATH};
+    use crate::conf::{Compression, Configuration};
     use regex::Regex;
+
+    /// default binding host.
+    const DEFAULT_HOST: &'static str = "127.0.0.1";
+
+    /// default binding port.
+    const DEFAULT_PORT: u16 = 9900;
+
+    /// default serving directory.
+    const DEFAULT_ROOT_PATH: &'static str = ".";
 
     #[test]
     fn should_run_with_defaults() {

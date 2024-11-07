@@ -29,13 +29,16 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes = "^1.8"
 urlencoding = "2"
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["rt"] }
 futures-util = "0.3"
 regex = "^1.7"
 serde = { version = "1", features = ["derive"] }
 lazy_static = "1"
 chrono = "0.4"
 log = "0.4"
+
+rustls = "0.23"
+tokio-rustls = "0.26"
 
 [[bin]]
 name = "httprs"

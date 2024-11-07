@@ -282,6 +282,7 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
         }
     } else {
         let response_body = HTML_TEMPLATE
+            .replace("{{version}}", VERSION_STRING.as_str())
             .replace("{{header}}", "")
             .replace("{{title}}", format!("{}", "file not found").as_str())
             .replace("{{body}}", format!("file not found: {}", path).as_str());

@@ -1,27 +1,33 @@
 use std::{
-    env,
+    io::{
+        ErrorKind,
+        Error as IoError,
+    },
     error::Error,
-    path::PathBuf,
-    ffi::OsString,
+    sync::Arc,
+    sync::atomic::{AtomicBool, Ordering},
 };
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use colored::Colorize;
 use hyper::{
     server::conn::http1,
     service::service_fn,
 };
 use hyper_util::rt::TokioIo;
+use rustls::pki_types::{
+    CertificateDer,
+    PrivateKeyDer,
+    pem::PemObject,
+};
 use tokio::{
     net::TcpListener,
     signal::ctrl_c,
-    sync::broadcast::{channel, Receiver, Sender},
+    sync::RwLock,
 };
-use tokio::sync::Mutex;
+use tokio_util::task::TaskTracker;
+use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info};
-use crate::conf::{DEFAULT_HOST, DEFAULT_PORT, DEFAULT_ROOT_PATH};
 use super::{
-    conf::{Configuration, ROOT_PATH_KEY},
+    conf::Configuration,
     http::{file_service, local_address},
     VERSION_STRING,
 };
@@ -29,22 +35,21 @@ use super::{
 /// Simple http(s) server for static files
 pub struct Server {
     listener: Option<TcpListener>,
-    notifier: Sender<()>,
     /// The parsed server configuration
     pub configuration: Arc<Configuration>,
-    shutdown: Arc<Mutex<Shutdown>>,
+    shutdown: Arc<RwLock<Shutdown>>,
+    tracker: Arc<TaskTracker>,
 }
 
 impl Server {
     pub async fn new(conf: Configuration) -> Self {
-        match conf.merged().await {
+        match conf.init().await {
             Ok(conf) => {
-                let (notifier, receiver) = channel(1);
                 Server {
                     listener: None,
-                    notifier,
                     configuration: Arc::new(conf),
-                    shutdown: Arc::new(Mutex::new(Shutdown::new(receiver))),
+                    shutdown: Arc::new(RwLock::new(Shutdown::new())),
+                    tracker: Arc::new(TaskTracker::new()),
                 }
             }
             Err(err) => {
@@ -56,91 +61,25 @@ impl Server {
     pub async fn run(mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.setup_logging();
 
-        let default_host = DEFAULT_HOST.to_string();
-        let host = self.configuration.host.as_ref().unwrap_or(&default_host);
-        let port = self.configuration.port.unwrap_or(DEFAULT_PORT);
-        let default_root: OsString = PathBuf::from(DEFAULT_ROOT_PATH).into();
-        let root_path = self.configuration.root.as_ref().unwrap_or(&default_root);
-        env::set_var(ROOT_PATH_KEY, PathBuf::from(&root_path).as_path());
-        debug!("Setting ROOT_PATH environment variable to {}", root_path.to_str().unwrap());
+        let host = self.configuration.host.as_ref().unwrap();
+        let port = self.configuration.port.unwrap();
         debug!("Serving with configuration: {}", self.configuration.display());
 
         let binding_addr = format!("{}:{}", host, port);
-        let protocol = self.configuration.protocol();
-
         match TcpListener::bind(binding_addr.clone()).await {
             Ok(listener) => {
                 self.listener = Some(listener);
-                let protocol_colored = protocol.to_uppercase().green();
-                info!("Server {} started.",VERSION_STRING.bright_blue());
-                // TODO: simplify printing
-                info!(
-                    "Serving {} on: {}",
-                    protocol_colored,
-                    format!(
-                        "{}://{}:{}",
-                        protocol,
-                        self.listener.as_ref().unwrap().local_addr().unwrap().ip(),
-                        port
-                    ).green()
-                );
-                if host == "0.0.0.0" {
-                    if let Some(ip) = local_address() {
-                        info!(
-                            "Local Network {} on: {}",
-                            protocol_colored,
-                            format!("{}://{}:{}", protocol, ip, port).green()
-                        );
-                    }
-                }
+                self.print_server_info();
 
-                if self.configuration.graceful_shutdown {
-                    // with graceful shutdown
-                    tokio::spawn(async move {
-                        ctrl_c().await.unwrap();
-                        debug!("ctrl_c signal received, finishing up...");
-                        self.notifier.send(()).unwrap();
-                    });
-                    let shutdown = self.shutdown.clone();
-                    tokio::select! {
-                        _ = async move {
-                            let mut lock = shutdown.lock().await;
-                            lock.recv().await;
-                            drop(lock);
-                            debug!("shutdown signal received...");
-                        } => {
-                            // TODO: shutdown hook
-                            info!("cleaning up...");
-                        },
-
-                        _ = async move {
-                            loop {
-                                let (tcp, _) = self.listener.as_ref().unwrap().accept().await.unwrap();
-
-                                if let Err(err) = http1::Builder::new()
-                                    .serve_connection(TokioIo::new(tcp), service_fn(file_service))
-                                    .await
-                                {
-                                    error!("Error serving connection: {:?}", err);
-                                }
-                                if self.shutdown.lock().await.in_shutdown() {
-                                    break;
-                                }
-                            }
-                        } => {},
-                    }
+                let result = if self.configuration.graceful_shutdown {
+                    self.run_with_graceful_shutdown().await
                 } else {
-                    // without graceful shutdown
-                    loop {
-                        let (tcp, _) = self.listener.as_ref().unwrap().accept().await?;
-                        tokio::spawn(async move {
-                            if let Err(err) = http1::Builder::new()
-                                .serve_connection(TokioIo::new(tcp), service_fn(file_service))
-                                .await
-                            {
-                                error!("Error serving connection: {:?}", err);
-                            }
-                        });
+                    self.run_simply(None::<Box<dyn Fn() -> bool>>).await
+                };
+                match result {
+                    Ok(_) => {}
+                    Err(e) => {
+                        error!("{}", e);
                     }
                 }
             }
@@ -154,9 +93,9 @@ impl Server {
 
     fn setup_logging(&self) {
         let level = if self.configuration.quiet {
-            tracing::Level::WARN
+            tracing::Level::ERROR
         } else {
-            tracing::Level::DEBUG
+            tracing::Level::INFO
         };
         tracing_subscriber::fmt()
             .with_max_level(level)
@@ -165,35 +104,145 @@ impl Server {
             .with_level(false)
             .init();
     }
+
+    fn https_acceptor(&self) -> Option<TlsAcceptor> {
+        if self.configuration.secure.is_some() {
+            let conf_dup = self.configuration.clone();
+            let cert_file = conf_dup.as_ref().clone().secure.unwrap().cert.unwrap();
+            let key_file = conf_dup.as_ref().clone().secure.unwrap().key.unwrap();
+            let certs = CertificateDer::pem_file_iter(cert_file)
+                .unwrap()
+                .map(|cert| cert.unwrap())
+                .collect();
+            let private_key = PrivateKeyDer::from_pem_file(key_file)
+                .unwrap();
+            let config = rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(certs, private_key).unwrap();
+            Some(TlsAcceptor::from(Arc::new(config)))
+        } else {
+            None
+        }
+    }
+
+    async fn run_with_graceful_shutdown(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // with graceful shutdown
+        tokio::select! {
+            _ = ctrl_c() => {
+                info!("ctrl_c signal received, processing shutdown...");
+                self.shutdown.write().await.shutdown();
+            },
+
+            _ = self.run_simply(Some(
+                move ||{
+                    let in_shutdown = self.shutdown.try_read();
+                    in_shutdown.is_ok() && in_shutdown.unwrap().in_shutdown()
+                })) => {
+                debug!("main loop terminated");
+            },
+        }
+        self.tracker.close();
+        // TODO: add timeout to avoid waiting without a limit
+        self.tracker.wait().await;
+        info!("Shutting down processed. Bye!");
+        Ok(())
+    }
+
+    async fn run_simply(&self, stop_check: Option<impl Fn() -> bool>) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // without graceful shutdown
+        let acceptor = self.https_acceptor();
+        loop {
+            let (tcp, _) = self.listener.as_ref().unwrap().accept().await?;
+            let http = http1::Builder::new();
+            let acceptor = acceptor.clone();
+            let configuration = self.configuration.clone();
+
+            self.tracker.clone().spawn(async move {
+                let result = if configuration.secure.is_some() {
+                    let stream = acceptor.clone().unwrap().accept(tcp).await;
+                    match stream {
+                        Ok(stream) => {
+                            if let Err(err) =
+                                http.serve_connection(TokioIo::new(stream), service_fn(file_service)).await {
+                                Err(IoError::new(ErrorKind::ConnectionAborted, err.to_string()))
+                            } else {
+                                Ok(())
+                            }
+                        }
+                        Err(err) => {
+                            Err(IoError::new(ErrorKind::ConnectionAborted, err.to_string()))
+                        }
+                    }
+                } else {
+                    match http.serve_connection(TokioIo::new(tcp), service_fn(file_service)).await {
+                        Ok(_) => Ok(()),
+                        Err(err) => {
+                            Err(IoError::new(ErrorKind::ConnectionAborted, err.to_string()))
+                        }
+                    }
+                };
+                if let Err(err) = result {
+                    error!("Error establish connection: {:?}", err);
+                }
+            });
+
+            if let Some(ref check) = stop_check {
+                if check() {
+                    debug!("stopping loop...");
+                    break Ok(());
+                }
+            }
+        }
+    }
+
+    fn print_server_info(&self) {
+        let protocol = self.configuration.protocol();
+        let host = self.configuration.host.as_ref().unwrap();
+        let port = self.configuration.port.unwrap();
+        let protocol_colored = protocol.to_uppercase().green();
+        info!("Server {} started.",VERSION_STRING.bright_blue());
+        info!("Serving {} on: {}",
+                    protocol_colored,
+                    format!(
+                        "{}://{}:{}",
+                        protocol,
+                        self.listener.as_ref().unwrap().local_addr().unwrap().ip(),
+                        port
+                    ).green()
+                );
+        if host == "0.0.0.0" {
+            if let Some(ip) = local_address() {
+                info!("Local Network {} on: {}",
+                            protocol_colored,
+                            format!("{}://{}:{}", protocol, ip, port).green()
+                        );
+            }
+        }
+    }
 }
 
 struct Shutdown {
     in_shutdown: Arc<AtomicBool>,
-    notify: Receiver<()>,
 }
 
 impl Shutdown {
-    /// Create a new `Shutdown` backed by the given `Receiver<_>`.
-    pub(crate) fn new(notify: Receiver<()>) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             in_shutdown: Arc::new(AtomicBool::new(false)),
-            notify,
         }
     }
 
-    /// indicates if in shutdown process or not
+    /// check in shutdown state or not
     pub(crate) fn in_shutdown(&self) -> bool {
         self.in_shutdown.load(Ordering::SeqCst)
     }
 
-    // Receive the shutdown notice, waiting if necessary.
-    pub(crate) async fn recv(&mut self) {
+    /// update the status.
+    pub(crate) fn shutdown(&mut self) {
         if self.in_shutdown.load(Ordering::SeqCst) {
             debug!("service is already in closing phase...");
             return;
         }
-
-        let _ = self.notify.recv().await;
         self.in_shutdown.store(true, Ordering::SeqCst);
     }
 }
