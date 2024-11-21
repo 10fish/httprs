@@ -1,31 +1,41 @@
-name: Audit
-
-# This being a separate file, so there can be an own badge in README file
-# and therefore spread awareness of cargo audit a tiny bit.
+name: Security Audit
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
   schedule:
-    # Runs at 05:00 UTC on Thu
-    - cron: "0 5 * * 4"
+    - cron: '0 0 * * *'  # Run daily at midnight UTC
+  push:
+    paths: 
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+  pull_request:
+    paths: 
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
   workflow_dispatch:
-  # This allows running it on any branch manually:
-  # https://docs.github.com/en/actions/managing-workflow-runs/manually-running-a-workflow
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   audit:
+    name: Security Audit
     runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      checks: write
     steps:
       - uses: actions/checkout@v3
-      - uses: actions-rs/install@v0.1
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Install cargo-audit
+        uses: actions-rs/install@v0.1
         with:
           crate: cargo-audit
           version: latest
-      - run: cargo audit --version
-      - run: cargo audit
+          
+      - name: Run audit
+        uses: actions-rs/audit-check@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
