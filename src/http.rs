@@ -1,47 +1,37 @@
-use std::{
-    env,
-    convert::Infallible,
-    ffi::OsString,
-    path::{Path, PathBuf},
-    time::SystemTime,
-    cmp::{max, min},
-    io::{Read, Seek, SeekFrom},
-    pin::Pin,
-    task::{Context, Poll},
-};
+use crate::{DEFAULT_MIME_TYPE, MIME_TYPES, VERSION_STRING};
 use bytes::Bytes;
 use chrono::{DateTime, Local};
 use colored::Colorize;
 use futures_util::TryStreamExt;
-use http_body_util::{
-    BodyExt,
-    StreamBody,
-    combinators::BoxBody,
-};
+use http_body_util::{combinators::BoxBody, BodyExt, StreamBody};
 use hyper::{
-    header,
-    Request,
-    Response,
-    StatusCode,
     body::{Frame, Incoming},
+    header,
     header::HeaderValue,
     header::RANGE,
+    Request, Response, StatusCode,
 };
 use lazy_static::lazy_static;
 use regex::Regex;
+use std::{
+    cmp::{max, min},
+    convert::Infallible,
+    env,
+    ffi::OsString,
+    io::{Read, Seek, SeekFrom},
+    path::{Path, PathBuf},
+    pin::Pin,
+    task::{Context, Poll},
+    time::SystemTime,
+};
 use tokio::{
     fs::File,
     io::{AsyncRead, ReadBuf},
 };
 use tokio_util::io::ReaderStream;
-use tracing::{debug, Level, trace, warn};
+use tracing::{debug, trace, warn, Level};
 use urlencoding::decode;
 use walkdir::WalkDir;
-use crate::{
-    MIME_TYPES,
-    DEFAULT_MIME_TYPE,
-    VERSION_STRING
-};
 
 const HTML_TEMPLATE: &'static str = include_str!("../static/index.html");
 
@@ -85,7 +75,6 @@ const BREADCRUMBS_ITEM: &'static str = r###"
 </li>
 "###;
 
-
 /// response with partial content when body size larger than 50MB
 const RESPONSE_BODY_SIZE_LIMIT_IN_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -97,7 +86,8 @@ const RESPONSE_BODY_SIZE_LIMIT_IN_BYTES: u64 = 50 * 1024 * 1024;
 /// Range: <unit>=<range-start>-<range-end>, <range-start>-<range-end>, <range-start>-<range-end>
 /// Range: <unit>=-<suffix-length>
 /// ```
-const HEADER_RANGE_VALUE_REGEX: &'static str = "^([\\w]+)\\s*=\\s*(-\\d+|\\d+-\\d+|\\d+-)(,\\s*(-\\d+|\\d+-\\d+|\\d+-))*";
+const HEADER_RANGE_VALUE_REGEX: &'static str =
+    "^([\\w]+)\\s*=\\s*(-\\d+|\\d+-\\d+|\\d+-)(,\\s*(-\\d+|\\d+-\\d+|\\d+-))*";
 const RANGE_REGEX: &'static str = "((-\\d+)|(\\d+-\\d+)|(\\d+-))";
 
 const DEFAULT_RANGE_UNIT: &'static str = "bytes";
@@ -107,10 +97,14 @@ const MULTIPART_BYTERANGES_MULTIPART_BOUNDARY: &'static str = "THIS_SEPARATES";
 lazy_static! {
     static ref HEADER_SERVER_VALUE: HeaderValue = HeaderValue::from_static(VERSION_STRING.as_str());
     static ref MULTIPART_BYTERANGES_HEADER_VALUE: HeaderValue = HeaderValue::from_str(
-        format!("multipart/byteranges; boundary={}", MULTIPART_BYTERANGES_MULTIPART_BOUNDARY).as_str()
-    ).unwrap();
+        format!(
+            "multipart/byteranges; boundary={}",
+            MULTIPART_BYTERANGES_MULTIPART_BOUNDARY
+        )
+        .as_str()
+    )
+    .unwrap();
 }
-
 
 /// consists of a range with a start or an end(if not, it means to the start or end of the target file).
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -145,17 +139,24 @@ struct MultipartByteRanges {
 }
 
 /// file service
-pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible> {
+pub(crate) async fn file_service(
+    request: Request<Incoming>,
+) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible> {
     let timer = SystemTime::now();
     let path = request.uri().path();
-    let root = env::var(super::conf::ROOT_PATH_KEY).expect("environment variable HTTPRS_ROOT not set!");
+    let root =
+        env::var(super::conf::ROOT_PATH_KEY).expect("environment variable HTTPRS_ROOT not set!");
     let root_path = PathBuf::from(root);
     // strip the prefix of '/' because path join will get to system root if not
     let full_path = root_path.join(decode(path).unwrap().strip_prefix("/").unwrap());
     // debug!("requesting file path: {}", full_path.to_str().unwrap());
     if tracing::enabled!(Level::TRACE) {
         for hn in request.headers().keys() {
-            trace!("HEADER: {} -> {}", hn, request.headers().get(hn).unwrap().to_str().unwrap())
+            trace!(
+                "HEADER: {} -> {}",
+                hn,
+                request.headers().get(hn).unwrap().to_str().unwrap()
+            )
         }
     }
 
@@ -168,7 +169,11 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
             for entry in WalkDir::new(full_path.clone()).max_depth(1) {
                 let p = entry.unwrap().clone();
 
-                let r_path = p.path().to_str().unwrap().strip_prefix(root_path.to_str().unwrap())
+                let r_path = p
+                    .path()
+                    .to_str()
+                    .unwrap()
+                    .strip_prefix(root_path.to_str().unwrap())
                     .unwrap_or(p.path().to_str().unwrap());
                 // debug!("relative path (to ROOT): {}", r_path);
                 // skip current path showing
@@ -181,7 +186,10 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
                     .replace("{{link}}", r_path)
                     .replace("{{filename}}", p.file_name().to_str().unwrap())
                     .replace("{{filesize}}", format!("{}", meta.len()).as_str())
-                    .replace("{{modified}}", modified.format("%b %d %Y - %H:%M").to_string().as_str())
+                    .replace(
+                        "{{modified}}",
+                        modified.format("%b %d %Y - %H:%M").to_string().as_str(),
+                    )
                     .as_str();
             }
             if file_list != "" {
@@ -191,18 +199,28 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
                 .replace("{{filelist}}", file_list.as_str())
                 .replace("{{placeholder}}", empty_content);
 
-
             let response_body = HTML_TEMPLATE
                 .replace("{{version}}", VERSION_STRING.as_str())
-                .replace("{{header}}", breadcrumbs(full_path.as_path(), root_path.as_path()).as_str())
-                .replace("{{title}}", format!("File list under {}", html_title).as_str())
+                .replace(
+                    "{{header}}",
+                    breadcrumbs(full_path.as_path(), root_path.as_path()).as_str(),
+                )
+                .replace(
+                    "{{title}}",
+                    format!("File list under {}", html_title).as_str(),
+                )
                 .replace("{{body}}", html_body.as_str());
 
-            log_request(&request, timer.elapsed().unwrap().as_micros(), StatusCode::OK);
+            log_request(
+                &request,
+                timer.elapsed().unwrap().as_micros(),
+                StatusCode::OK,
+            );
             Ok(Response::builder()
                 .header(header::SERVER, HEADER_SERVER_VALUE.clone())
                 .status(StatusCode::OK)
-                .body(BoxBody::new(response_body)).unwrap())
+                .body(BoxBody::new(response_body))
+                .unwrap())
         } else {
             // Resolve file extension to HTTP Content-Type
             let content_type = resolve_content_type(Box::new(path));
@@ -218,38 +236,55 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
 
                 // debug only
                 if tracing::enabled!(Level::TRACE) {
-                    let ranges_display = range.segments.iter().map(|v| {
-                        match v {
+                    let ranges_display = range
+                        .segments
+                        .iter()
+                        .map(|v| match v {
                             Segment::RemainingFrom(a) => format!("[{},E)", a),
                             Segment::Regional(a, b) => format!("[{},{}]", a, b),
                             Segment::RemainingSize(a) => format!("[E-{},E)", a),
-                        }
-                    }).reduce(|a, b| a + "," + b.as_str()).unwrap();
+                        })
+                        .reduce(|a, b| a + "," + b.as_str())
+                        .unwrap();
                     trace!("accessing file segments: < {} >", ranges_display);
                 }
 
                 // respond with multipart byte-ranges body parts if more than several ranges requested
                 if range.multipart() {
                     let range_values = range.segments.clone();
-                    let byte_ranges = MultipartByteRanges::new(
-                        full_path.as_path(), content_type, &range_values);
+                    let byte_ranges =
+                        MultipartByteRanges::new(full_path.as_path(), content_type, &range_values);
 
                     let body_stream = ReaderStream::new(byte_ranges);
                     let body = BodyExt::map_err(
-                        StreamBody::new(body_stream.map_ok(Frame::data)), infallible).boxed();
-                    log_request(&request, timer.elapsed().unwrap().as_micros(), StatusCode::PARTIAL_CONTENT);
+                        StreamBody::new(body_stream.map_ok(Frame::data)),
+                        infallible,
+                    )
+                    .boxed();
+                    log_request(
+                        &request,
+                        timer.elapsed().unwrap().as_micros(),
+                        StatusCode::PARTIAL_CONTENT,
+                    );
                     let response = Response::builder()
                         .header(header::SERVER, HEADER_SERVER_VALUE.clone())
-                        .header(header::CONTENT_TYPE, MULTIPART_BYTERANGES_HEADER_VALUE.clone())
+                        .header(
+                            header::CONTENT_TYPE,
+                            MULTIPART_BYTERANGES_HEADER_VALUE.clone(),
+                        )
                         .status(StatusCode::PARTIAL_CONTENT);
                     Ok(response.body(body).unwrap())
                 } else {
                     let range_value = range.segments[0].clone();
-                    let (file_segment, length, content_range) = read_segment(&full_path, &range_value).await;
+                    let (file_segment, length, content_range) =
+                        read_segment(&full_path, &range_value).await;
 
                     let body_stream = ReaderStream::new(file_segment);
                     let body = BodyExt::map_err(
-                        StreamBody::new(body_stream.map_ok(Frame::data)), infallible).boxed();
+                        StreamBody::new(body_stream.map_ok(Frame::data)),
+                        infallible,
+                    )
+                    .boxed();
 
                     let status = match range.integrality() {
                         true => StatusCode::OK,
@@ -261,23 +296,36 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
                         .header(header::CONTENT_TYPE, HeaderValue::from_static(content_type))
                         .header(header::CONTENT_RANGE, content_range)
                         .header(header::CONTENT_LENGTH, HeaderValue::from(length))
-                        .header(header::ACCEPT_RANGES, HeaderValue::from_static(DEFAULT_RANGE_UNIT))
+                        .header(
+                            header::ACCEPT_RANGES,
+                            HeaderValue::from_static(DEFAULT_RANGE_UNIT),
+                        )
                         .status(status)
-                        .body(body).unwrap())
+                        .body(body)
+                        .unwrap())
                 }
             } else {
                 let body_stream = ReaderStream::new(file);
-                let body = BodyExt::map_err(
-                    StreamBody::new(body_stream.map_ok(Frame::data)), infallible).boxed();
+                let body =
+                    BodyExt::map_err(StreamBody::new(body_stream.map_ok(Frame::data)), infallible)
+                        .boxed();
 
-                log_request(&request, timer.elapsed().unwrap().as_micros(), StatusCode::OK);
+                log_request(
+                    &request,
+                    timer.elapsed().unwrap().as_micros(),
+                    StatusCode::OK,
+                );
                 Ok(Response::builder()
                     .header(header::SERVER, HEADER_SERVER_VALUE.clone())
                     .header(header::CONTENT_TYPE, HeaderValue::from_static(content_type))
-                    .header(header::ACCEPT_RANGES, HeaderValue::from_static(DEFAULT_RANGE_UNIT))
+                    .header(
+                        header::ACCEPT_RANGES,
+                        HeaderValue::from_static(DEFAULT_RANGE_UNIT),
+                    )
                     .header(header::CONTENT_LENGTH, HeaderValue::from(file_size))
                     .status(StatusCode::OK)
-                    .body(body).unwrap())
+                    .body(body)
+                    .unwrap())
             }
         }
     } else {
@@ -287,11 +335,16 @@ pub(crate) async fn file_service(request: Request<Incoming>) -> Result<Response<
             .replace("{{title}}", format!("{}", "file not found").as_str())
             .replace("{{body}}", format!("file not found: {}", path).as_str());
 
-        log_request(&request, timer.elapsed().unwrap().as_micros(), StatusCode::NOT_FOUND);
+        log_request(
+            &request,
+            timer.elapsed().unwrap().as_micros(),
+            StatusCode::NOT_FOUND,
+        );
         Ok(Response::builder()
             .header(header::SERVER, HEADER_SERVER_VALUE.clone())
             .status(StatusCode::NOT_FOUND)
-            .body(response_body.boxed()).unwrap())
+            .body(response_body.boxed())
+            .unwrap())
     }
 }
 
@@ -325,13 +378,21 @@ async fn read_segment(path: &Path, seg: &Segment) -> (FileSegment, u64, HeaderVa
     let segment_size = seg_end - seg_start + 1;
 
     // println!("from: {}, to: {}, read: {}, bytes: {:?}", range_from, range_to, actual_size, buf);
-    (FileSegment {
-        file: PathBuf::from(path),
-        offset: seg_start,
-        size: segment_size,
-    },
-     segment_size,
-     HeaderValue::from_str(format!("{} {}-{}/{}", DEFAULT_RANGE_UNIT, seg_start, seg_end, file_size).as_str()).unwrap(),
+    (
+        FileSegment {
+            file: PathBuf::from(path),
+            offset: seg_start,
+            size: segment_size,
+        },
+        segment_size,
+        HeaderValue::from_str(
+            format!(
+                "{} {}-{}/{}",
+                DEFAULT_RANGE_UNIT, seg_start, seg_end, file_size
+            )
+            .as_str(),
+        )
+        .unwrap(),
     )
 }
 
@@ -339,17 +400,30 @@ async fn read_segment(path: &Path, seg: &Segment) -> (FileSegment, u64, HeaderVa
 fn log_request(request: &Request<Incoming>, time: u128, status_code: StatusCode) {
     match status_code {
         success if success.lt(&StatusCode::BAD_REQUEST) => {
-            debug!("{} {} {:?} {}µs {} {:?}", request.method().to_string().blue(), request.uri(),
-                request.version(),time, success.to_string().green(),request.headers().get(header::USER_AGENT).unwrap());
+            debug!(
+                "{} {} {:?} {}µs {} {:?}",
+                request.method().to_string().blue(),
+                request.uri(),
+                request.version(),
+                time,
+                success.to_string().green(),
+                request.headers().get(header::USER_AGENT).unwrap()
+            );
         }
         fail if fail.ge(&StatusCode::BAD_REQUEST) => {
-            warn!("{} {} {:?} {}µs {} {:?}", request.method().to_string().blue(), request.uri(),
-                request.version(),time, fail.to_string().red(),request.headers().get(header::USER_AGENT).unwrap());
+            warn!(
+                "{} {} {:?} {}µs {} {:?}",
+                request.method().to_string().blue(),
+                request.uri(),
+                request.version(),
+                time,
+                fail.to_string().red(),
+                request.headers().get(header::USER_AGENT).unwrap()
+            );
         }
         _other => {}
     };
 }
-
 
 #[allow(dead_code)]
 impl Range {
@@ -382,16 +456,24 @@ impl Range {
                         if idx == 0 {
                             ranges.push(Segment::RemainingSize(pair[1..].parse::<u64>().unwrap()));
                         } else if idx == pair.len() - 1 {
-                            ranges.push(Segment::RemainingFrom(pair[..idx].parse::<u64>().unwrap()));
+                            ranges
+                                .push(Segment::RemainingFrom(pair[..idx].parse::<u64>().unwrap()));
                         } else {
-                            ranges.push(Segment::Regional(pair[..idx].parse::<u64>().unwrap(),
-                                                          pair[idx + 1..].parse::<u64>().unwrap()));
+                            ranges.push(Segment::Regional(
+                                pair[..idx].parse::<u64>().unwrap(),
+                                pair[idx + 1..].parse::<u64>().unwrap(),
+                            ));
                         }
                     }
                 }
             }
         }
-        Self { unit, segments: ranges, combined: false, filesize: None }
+        Self {
+            unit,
+            segments: ranges,
+            combined: false,
+            filesize: None,
+        }
     }
 
     /// attach range to an existing file context
@@ -406,20 +488,33 @@ impl Range {
             return;
         }
         // sort RangeValue by start, and combine that overlapped
-        let mut regions: Vec<(u64, u64)> = self.segments.iter().map(|rv| {
-            match rv {
-                Segment::RemainingFrom(start) => (min(*start, self.filesize.unwrap() - 1), self.filesize.unwrap() - 1),
+        let mut regions: Vec<(u64, u64)> = self
+            .segments
+            .iter()
+            .map(|rv| match rv {
+                Segment::RemainingFrom(start) => (
+                    min(*start, self.filesize.unwrap() - 1),
+                    self.filesize.unwrap() - 1,
+                ),
                 Segment::Regional(start, end) => {
                     if start > end {
                         return (0, 0);
                     } else {
-                        (min(*start, self.filesize.unwrap() - 1), min(*end, self.filesize.unwrap() - 1))
+                        (
+                            min(*start, self.filesize.unwrap() - 1),
+                            min(*end, self.filesize.unwrap() - 1),
+                        )
                     }
                 }
-                Segment::RemainingSize(size) =>
-                    (min(max(0, self.filesize.unwrap() - size), self.filesize.unwrap() - 1), self.filesize.unwrap() - 1)
-            }
-        }).collect();
+                Segment::RemainingSize(size) => (
+                    min(
+                        max(0, self.filesize.unwrap() - size),
+                        self.filesize.unwrap() - 1,
+                    ),
+                    self.filesize.unwrap() - 1,
+                ),
+            })
+            .collect();
         regions.sort_by(|l, r| {
             if l.0 == r.0 {
                 return l.1.cmp(&r.1);
@@ -445,10 +540,10 @@ impl Range {
 
     /// check if two segments are overlapping.
     fn overlapping(left: &(u64, u64), right: &(u64, u64)) -> bool {
-        (left.0 >= right.0 && left.0 <= right.1) ||
-            (left.1 >= right.0 && left.1 <= right.1) ||
-            (right.0 >= left.0 && right.0 <= left.1) ||
-            (right.1 >= left.0 && right.1 <= left.1)
+        (left.0 >= right.0 && left.0 <= right.1)
+            || (left.1 >= right.0 && left.1 <= right.1)
+            || (right.0 >= left.0 && right.0 <= left.1)
+            || (right.1 >= left.0 && right.1 <= left.1)
     }
 
     /// combine two segments if they are overlapping, or return the first one if not.
@@ -456,7 +551,10 @@ impl Range {
         if Self::overlapping(left, right) {
             *left = (min(left.0, right.0), max(left.1, right.1));
         } else {
-            warn!("range is not overlapping with parameter, staying not combined: {:?} <-> {:?}", left, right);
+            warn!(
+                "range is not overlapping with parameter, staying not combined: {:?} <-> {:?}",
+                left, right
+            );
         }
         left
     }
@@ -471,13 +569,17 @@ impl Range {
 
     /// check if the range actually covers the full file.
     fn integrality(&self) -> bool {
-        self.segments.len() < 1 ||
-            self.segments[0].eq(&Segment::Regional(0, self.filesize.unwrap() - 1))
+        self.segments.len() < 1
+            || self.segments[0].eq(&Segment::Regional(0, self.filesize.unwrap() - 1))
     }
 }
 
 impl AsyncRead for FileSegment {
-    fn poll_read(self: Pin<&mut Self>, _cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
         let mut file = std::fs::File::open(self.file.as_path()).expect("read file error");
         file.seek(SeekFrom::Start(self.offset)).unwrap();
         let segment_size = min(self.size as usize, buf.remaining());
@@ -492,7 +594,11 @@ impl AsyncRead for FileSegment {
 }
 
 impl AsyncRead for MultipartByteRanges {
-    fn poll_read(mut self: Pin<&mut Self>, _cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
         if self.pos.0 >= self.segments.len() || self.pos.2 {
             return Poll::Ready(Ok(()));
         }
@@ -531,7 +637,8 @@ impl AsyncRead for MultipartByteRanges {
             } else {
                 let mut read_buf = vec![0u8; buf.remaining()];
                 file.seek(SeekFrom::Start(segment.0 + self.pos.1)).unwrap();
-                file.read_exact(&mut read_buf).expect("read file to buffer error");
+                file.read_exact(&mut read_buf)
+                    .expect("read file to buffer error");
                 buf.put_slice(read_buf.as_slice());
 
                 self.pos.1 += read_buf.len() as u64;
@@ -556,14 +663,13 @@ impl MultipartByteRanges {
         Self {
             file: PathBuf::from(file),
             content_type: String::from(content_type),
-            segments: range_values.iter()
-                .map(|v| {
-                    match v {
-                        Segment::Regional(from, to) => (*from, (*to - *from + 1)),
-                        Segment::RemainingFrom(_) |
-                        Segment::RemainingSize(_) => (0, 0)
-                    }
-                }).collect(),
+            segments: range_values
+                .iter()
+                .map(|v| match v {
+                    Segment::Regional(from, to) => (*from, (*to - *from + 1)),
+                    Segment::RemainingFrom(_) | Segment::RemainingSize(_) => (0, 0),
+                })
+                .collect(),
             pos: (0, 0, false),
         }
     }
@@ -587,8 +693,16 @@ impl MultipartByteRanges {
         let mut part_buf = String::new();
         part_buf.push_str(format!("--{}\r\n", MULTIPART_BYTERANGES_MULTIPART_BOUNDARY).as_str());
         part_buf.push_str(format!("Content-Type: {}\r\n", self.content_type).as_str());
-        part_buf.push_str(format!("Content-Range: {} {}-{}/{}\r\n", DEFAULT_RANGE_UNIT,
-                                  segment.0, segment.0 + segment.1 - 1, filesize).as_str());
+        part_buf.push_str(
+            format!(
+                "Content-Range: {} {}-{}/{}\r\n",
+                DEFAULT_RANGE_UNIT,
+                segment.0,
+                segment.0 + segment.1 - 1,
+                filesize
+            )
+            .as_str(),
+        );
         part_buf.push_str(format!("Content-Length: {}\r\n", segment.1).as_str());
         part_buf.push_str("\r\n");
         part_buf.into_bytes()
@@ -685,13 +799,14 @@ mod tests {
                 .replace("{{label}}", label)
                 .as_str();
         }
-        let expected = String::from(BREADCRUMBS_TEMPLATE)
-            .replace("{{items}}", items.as_str());
+        let expected = String::from(BREADCRUMBS_TEMPLATE).replace("{{items}}", items.as_str());
 
         // remove all spaces to compare
         let regex = Regex::new(r"[\s]").unwrap();
-        assert_eq!(regex.replace_all(actual.as_str(), ""),
-                   regex.replace_all(expected.as_str(), ""));
+        assert_eq!(
+            regex.replace_all(actual.as_str(), ""),
+            regex.replace_all(expected.as_str(), "")
+        );
     }
 
     #[test]
@@ -699,19 +814,34 @@ mod tests {
         let regex = Regex::new(HEADER_RANGE_VALUE_REGEX).unwrap();
 
         let range_value1 = "bytes=1024-65335";
-        assert!(regex.captures(range_value1).is_some(), "regex should range value1");
+        assert!(
+            regex.captures(range_value1).is_some(),
+            "regex should range value1"
+        );
 
         let range_value2 = "bytes=-65335, 102400-";
-        assert!(regex.captures(range_value2).is_some(), "regex should range value2");
+        assert!(
+            regex.captures(range_value2).is_some(),
+            "regex should range value2"
+        );
 
         let range_value3 = "bytes=-65335,102400-";
-        assert!(regex.captures(range_value3).is_some(), "regex should range value3");
+        assert!(
+            regex.captures(range_value3).is_some(),
+            "regex should range value3"
+        );
 
         let range_value4 = "bytes=-612233";
-        assert!(regex.captures(range_value4).is_some(), "regex should range value4");
+        assert!(
+            regex.captures(range_value4).is_some(),
+            "regex should range value4"
+        );
 
         let range_value5 = "bytes=1024-2048, 3072-4096, 6172-102400";
-        assert!(regex.captures(range_value5).is_some(), "regex should range value5");
+        assert!(
+            regex.captures(range_value5).is_some(),
+            "regex should range value5"
+        );
     }
 
     #[test]
@@ -726,10 +856,7 @@ mod tests {
     #[test]
     fn should_parse_range1() {
         let range_header = HeaderValue::from_static("bytes=-1024, 23345-");
-        let expected_ranges = vec![
-            Segment::RemainingSize(1024),
-            Segment::RemainingFrom(23345),
-        ];
+        let expected_ranges = vec![Segment::RemainingSize(1024), Segment::RemainingFrom(23345)];
         let range = Range::from(&range_header);
         assert_eq!(range.unit, String::from("bytes"));
         assert_eq!(range.segments, expected_ranges);
@@ -770,28 +897,28 @@ mod tests {
 
         range.adjust(TEST_FILE_SIZE).combine_all();
 
-        assert_eq!(range, expected, "ranges should be combined and not overlapping");
+        assert_eq!(
+            range, expected,
+            "ranges should be combined and not overlapping"
+        );
     }
 
     #[test]
     fn should_ranges_combined1() {
         let mut range = Range::new();
-        range.segments = vec![
-            Segment::RemainingSize(1024),
-            Segment::RemainingFrom(512),
-        ];
+        range.segments = vec![Segment::RemainingSize(1024), Segment::RemainingFrom(512)];
         let mut expected = Range::new();
         expected.combined = true;
         expected.filesize = Some(TEST_FILE_SIZE);
-        expected.segments = vec![
-            Segment::Regional(512, TEST_FILE_SIZE - 1),
-        ];
+        expected.segments = vec![Segment::Regional(512, TEST_FILE_SIZE - 1)];
 
         range.adjust(TEST_FILE_SIZE).combine_all();
 
-        assert_eq!(range, expected, "ranges should be combined and not overlapping");
+        assert_eq!(
+            range, expected,
+            "ranges should be combined and not overlapping"
+        );
     }
-
 
     #[test]
     fn should_ranges_not_combined() {
@@ -815,7 +942,10 @@ mod tests {
 
         range.adjust(TEST_FILE_SIZE).combine_all();
 
-        assert_eq!(range, expected, "ranges should be combined and not overlapping");
+        assert_eq!(
+            range, expected,
+            "ranges should be combined and not overlapping"
+        );
     }
 
     #[tokio::test]

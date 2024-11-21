@@ -1,9 +1,6 @@
-use std::error::Error;
 use clap::Parser;
-use httprs::{
-    Configuration,
-    Server,
-};
+use httprs::{Configuration, Server};
+use std::error::Error;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {

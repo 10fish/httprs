@@ -1,7 +1,7 @@
 use clap::{Args, Parser, ValueEnum};
 use serde::Deserialize;
-use std::{env, error::Error, ffi::OsString};
 use std::path::PathBuf;
+use std::{env, error::Error, ffi::OsString};
 use tokio::{fs::File, io::AsyncReadExt};
 use tracing::{debug, error};
 
@@ -174,19 +174,21 @@ impl Configuration {
     pub(crate) fn set_env(&self) {
         let root_path = self.root.as_ref().unwrap();
         env::set_var(ROOT_PATH_KEY, PathBuf::from(&root_path).as_path());
-        debug!("Setting ROOT_PATH environment variable to {}", root_path.to_str().unwrap());
+        debug!(
+            "Setting ROOT_PATH environment variable to {}",
+            root_path.to_str().unwrap()
+        );
     }
 }
 
-
 #[cfg(test)]
 mod test {
-    use std::ffi::OsString;
-    use std::str::FromStr;
+    use crate::conf::{Compression, Configuration};
     use clap::error::ErrorKind::MissingRequiredArgument;
     use clap::Parser;
-    use crate::conf::{Compression, Configuration};
     use regex::Regex;
+    use std::ffi::OsString;
+    use std::str::FromStr;
 
     /// default binding host.
     const DEFAULT_HOST: &'static str = "127.0.0.1";
@@ -203,7 +205,10 @@ mod test {
         assert_eq!(config.config, None);
         assert_eq!(config.host, Some(DEFAULT_HOST.to_string()));
         assert_eq!(config.port, Some(DEFAULT_PORT));
-        assert_eq!(config.root, Some(OsString::from_str(DEFAULT_ROOT_PATH).unwrap()));
+        assert_eq!(
+            config.root,
+            Some(OsString::from_str(DEFAULT_ROOT_PATH).unwrap())
+        );
         assert_eq!(config.compression, Compression::None);
         assert_eq!(config.secure, None);
         assert_eq!(config.graceful_shutdown, false);
@@ -227,10 +232,15 @@ mod test {
     #[test]
     fn should_complain_https_missing_key_and_cert() {
         let result = Configuration::try_parse_from(["--", "--secure"]);
-        assert_eq!(result.as_ref().err().unwrap().kind(), MissingRequiredArgument);
+        assert_eq!(
+            result.as_ref().err().unwrap().kind(),
+            MissingRequiredArgument
+        );
         let error_string = result.as_ref().err().unwrap().to_string();
         // Usage prompt will print full args required
-        let error_hint = Regex::new(r"Usage:.*").unwrap().replace_all(&error_string, "");
+        let error_hint = Regex::new(r"Usage:.*")
+            .unwrap()
+            .replace_all(&error_string, "");
         // println!("{}", error_hint);
         assert!(error_hint.contains("--cert <CERT>"));
         assert!(error_hint.contains("--key <KEY>"));
@@ -239,10 +249,15 @@ mod test {
     #[test]
     fn should_complain_https_missing_key() {
         let result = Configuration::try_parse_from(["--", "--secure", "--cert", "server.pem"]);
-        assert_eq!(result.as_ref().err().unwrap().kind(), MissingRequiredArgument);
+        assert_eq!(
+            result.as_ref().err().unwrap().kind(),
+            MissingRequiredArgument
+        );
         let error_string = result.as_ref().err().unwrap().to_string();
         // Usage prompt will print full args required
-        let error_hint = Regex::new(r"Usage:.*").unwrap().replace_all(&error_string, "");
+        let error_hint = Regex::new(r"Usage:.*")
+            .unwrap()
+            .replace_all(&error_string, "");
         // println!("{}", error_hint);
         assert!(!error_hint.contains("--cert <CERT>"));
         assert!(error_hint.contains("--key <KEY>"));
@@ -251,10 +266,15 @@ mod test {
     #[test]
     fn should_complain_https_missing_cert() {
         let result = Configuration::try_parse_from(["--", "--secure", "--key", "key.pem"]);
-        assert_eq!(result.as_ref().err().unwrap().kind(), MissingRequiredArgument);
+        assert_eq!(
+            result.as_ref().err().unwrap().kind(),
+            MissingRequiredArgument
+        );
         let error_string = result.as_ref().err().unwrap().to_string();
         // Usage prompt will print full args required
-        let error_hint = Regex::new(r"Usage:.*").unwrap().replace_all(&error_string, "");
+        let error_hint = Regex::new(r"Usage:.*")
+            .unwrap()
+            .replace_all(&error_string, "");
         // println!("{}", error_hint);
         assert!(error_hint.contains("--cert <CERT>"));
         assert!(!error_hint.contains("--key <KEY>"));
@@ -262,11 +282,24 @@ mod test {
 
     #[test]
     fn should_https_run_with_cert_and_key() {
-        let config = Configuration::parse_from(["--", "--secure", "--cert", "server.pem", "--key", "key.pem"]);
+        let config = Configuration::parse_from([
+            "--",
+            "--secure",
+            "--cert",
+            "server.pem",
+            "--key",
+            "key.pem",
+        ]);
         assert!(config.secure.is_some());
         assert_eq!(config.secure.as_ref().unwrap().secure, true);
-        assert_eq!(config.secure.as_ref().unwrap().cert, Some(OsString::from_str("server.pem").unwrap()));
-        assert_eq!(config.secure.as_ref().unwrap().key, Some(OsString::from_str("key.pem").unwrap()));
+        assert_eq!(
+            config.secure.as_ref().unwrap().cert,
+            Some(OsString::from_str("server.pem").unwrap())
+        );
+        assert_eq!(
+            config.secure.as_ref().unwrap().key,
+            Some(OsString::from_str("key.pem").unwrap())
+        );
     }
 
     // TODO: test conditional parsing

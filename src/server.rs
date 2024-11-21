@@ -1,36 +1,22 @@
-use std::{
-    io::{
-        ErrorKind,
-        Error as IoError,
-    },
-    error::Error,
-    sync::Arc,
-    sync::atomic::{AtomicBool, Ordering},
-};
-use colored::Colorize;
-use hyper::{
-    server::conn::http1,
-    service::service_fn,
-};
-use hyper_util::rt::TokioIo;
-use rustls::pki_types::{
-    CertificateDer,
-    PrivateKeyDer,
-    pem::PemObject,
-};
-use tokio::{
-    net::TcpListener,
-    signal::ctrl_c,
-    sync::RwLock,
-};
-use tokio_util::task::TaskTracker;
-use tokio_rustls::TlsAcceptor;
-use tracing::{debug, error, info};
 use super::{
     conf::Configuration,
     http::{file_service, local_address},
     VERSION_STRING,
 };
+use colored::Colorize;
+use hyper::{server::conn::http1, service::service_fn};
+use hyper_util::rt::TokioIo;
+use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
+use std::{
+    error::Error,
+    io::{Error as IoError, ErrorKind},
+    sync::atomic::{AtomicBool, Ordering},
+    sync::Arc,
+};
+use tokio::{net::TcpListener, signal::ctrl_c, sync::RwLock};
+use tokio_rustls::TlsAcceptor;
+use tokio_util::task::TaskTracker;
+use tracing::{debug, error, info};
 
 /// Simple http(s) server for static files
 pub struct Server {
@@ -44,14 +30,12 @@ pub struct Server {
 impl Server {
     pub async fn new(conf: Configuration) -> Self {
         match conf.init().await {
-            Ok(conf) => {
-                Server {
-                    listener: None,
-                    configuration: Arc::new(conf),
-                    shutdown: Arc::new(RwLock::new(Shutdown::new())),
-                    tracker: Arc::new(TaskTracker::new()),
-                }
-            }
+            Ok(conf) => Server {
+                listener: None,
+                configuration: Arc::new(conf),
+                shutdown: Arc::new(RwLock::new(Shutdown::new())),
+                tracker: Arc::new(TaskTracker::new()),
+            },
             Err(err) => {
                 panic!("cannot parse parameters: {}", err);
             }
@@ -63,7 +47,10 @@ impl Server {
 
         let host = self.configuration.host.as_ref().unwrap();
         let port = self.configuration.port.unwrap();
-        debug!("Serving with configuration: {}", self.configuration.display());
+        debug!(
+            "Serving with configuration: {}",
+            self.configuration.display()
+        );
 
         let binding_addr = format!("{}:{}", host, port);
         match TcpListener::bind(binding_addr.clone()).await {
@@ -114,11 +101,11 @@ impl Server {
                 .unwrap()
                 .map(|cert| cert.unwrap())
                 .collect();
-            let private_key = PrivateKeyDer::from_pem_file(key_file)
-                .unwrap();
+            let private_key = PrivateKeyDer::from_pem_file(key_file).unwrap();
             let config = rustls::ServerConfig::builder()
                 .with_no_client_auth()
-                .with_single_cert(certs, private_key).unwrap();
+                .with_single_cert(certs, private_key)
+                .unwrap();
             Some(TlsAcceptor::from(Arc::new(config)))
         } else {
             None
@@ -148,7 +135,10 @@ impl Server {
         Ok(())
     }
 
-    async fn run_simply(&self, stop_check: Option<impl Fn() -> bool>) -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn run_simply(
+        &self,
+        stop_check: Option<impl Fn() -> bool>,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         // without graceful shutdown
         let acceptor = self.https_acceptor();
         loop {
@@ -162,8 +152,10 @@ impl Server {
                     let stream = acceptor.clone().unwrap().accept(tcp).await;
                     match stream {
                         Ok(stream) => {
-                            if let Err(err) =
-                                http.serve_connection(TokioIo::new(stream), service_fn(file_service)).await {
+                            if let Err(err) = http
+                                .serve_connection(TokioIo::new(stream), service_fn(file_service))
+                                .await
+                            {
                                 Err(IoError::new(ErrorKind::ConnectionAborted, err.to_string()))
                             } else {
                                 Ok(())
@@ -174,7 +166,10 @@ impl Server {
                         }
                     }
                 } else {
-                    match http.serve_connection(TokioIo::new(tcp), service_fn(file_service)).await {
+                    match http
+                        .serve_connection(TokioIo::new(tcp), service_fn(file_service))
+                        .await
+                    {
                         Ok(_) => Ok(()),
                         Err(err) => {
                             Err(IoError::new(ErrorKind::ConnectionAborted, err.to_string()))
@@ -200,22 +195,25 @@ impl Server {
         let host = self.configuration.host.as_ref().unwrap();
         let port = self.configuration.port.unwrap();
         let protocol_colored = protocol.to_uppercase().green();
-        info!("Server {} started.",VERSION_STRING.bright_blue());
-        info!("Serving {} on: {}",
-                    protocol_colored,
-                    format!(
-                        "{}://{}:{}",
-                        protocol,
-                        self.listener.as_ref().unwrap().local_addr().unwrap().ip(),
-                        port
-                    ).green()
-                );
+        info!("Server {} started.", VERSION_STRING.bright_blue());
+        info!(
+            "Serving {} on: {}",
+            protocol_colored,
+            format!(
+                "{}://{}:{}",
+                protocol,
+                self.listener.as_ref().unwrap().local_addr().unwrap().ip(),
+                port
+            )
+            .green()
+        );
         if host == "0.0.0.0" {
             if let Some(ip) = local_address() {
-                info!("Local Network {} on: {}",
-                            protocol_colored,
-                            format!("{}://{}:{}", protocol, ip, port).green()
-                        );
+                info!(
+                    "Local Network {} on: {}",
+                    protocol_colored,
+                    format!("{}://{}:{}", protocol, ip, port).green()
+                );
             }
         }
     }
