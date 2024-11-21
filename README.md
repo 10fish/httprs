@@ -1,12 +1,12 @@
 # httprs
 
-[![License (MIT)](https://img.shields.io/crates/l/httprs)](https://github.com/10fish/httprs/blob/main/LICENSE.txt)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/10fish/httprs/blob/main/LICENSE.txt)
 [![CI Status](https://github.com/10fish/httprs/actions/workflows/ci.yml/badge.svg)](https://github.com/10fish/httprs/actions/workflows/ci.yml)
 [![Audit](https://github.com/10fish/httprs/actions/workflows/audit.yml/badge.svg)](https://github.com/10fish/httprs/actions/workflows/audit.yml)
 [![Dependency status](https://deps.rs/repo/github/10fish/httprs/status.svg)](https://deps.rs/repo/github/10fish/httprs)
-[![Crates.io](https://img.shields.io/crates/v/httprs)](https://crates.io/crates/httprs)
-[![docs.rs](https://img.shields.io/badge/docs-website-blue)](https://docs.rs/httprs/)
-[![Lines of code](https://tokei.rs/b1/github/10fish/httprs?category=lines)](https://github.com/10fish/httprs)
+[![Version](https://img.shields.io/crates/v/httprs.svg)](https://crates.io/crates/httprs)
+[![Docs](https://docs.rs/httprs/badge.svg)](https://docs.rs/httprs)
+[![Lines of Code](https://tokei.rs/b1/github/10fish/httprs)](https://github.com/10fish/httprs)
 
 A fast simple command line http server tool. 
 
