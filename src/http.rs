@@ -29,35 +29,44 @@ use crate::{DEFAULT_MIME_TYPE, MIME_TYPES, VERSION_STRING};
 const HTML_TEMPLATE: &str = include_str!("../static/index.html");
 
 const FILE_LIST_TABLE_TEMPLATE: &str = r###"
-<table>
-    <thead>
+<table style="margin-left: 1em">
+    <thead style="font-style: italic;">
         <tr>
-            <th>Name</th>
-            <th>Size</th>
+            <th style="padding-right: 1em;">File Name</th>
+            <th style="padding-right: 1em;">Size</th>
+            <th style="padding-right: 1em;">Last Modified</th>
         </tr>
     </thead>
     <tbody>
-        {{file_list}}
+        {{file_list}}{{placeholder}}
     </tbody>
-</table>"###;
+</table>
+"###;
 
 const EMPTY_LIST: &str = "<tr><td><i>&lt;empty&gt;</i><td></tr>";
 
 const FILE_LIST_TABLE_ROW: &str = r###"
 <tr>
-    <td><a href="{{href}}">{{name}}</a></td>
-    <td>{{size}}</td>
-</tr>"###;
+    <td style="padding-right: 1em;"><a href="{{href}}">{{name}}</a></td>
+    <td style="padding-right: 1em;">{{size}}</td>
+    <td style="padding-right: 1em;">{{modified}}</td>
+</tr>
+"###;
 
 const BREADCRUMBS_TEMPLATE: &str = r###"
-<div class="breadcrumbs">
+<ul id="breadcrumbs" style="display: flex;list-style: none;align-items: center;padding-inline: unset;margin-left: 1em;">
     {{items}}
-</div>"###;
+</ul>
+"###;
 
 const BREADCRUMBS_ITEM: &str = r###"
-<span class="breadcrumb-item">
-    <a href="{{href}}">{{name}}</a>
-</span>"###;
+<li class="breadcrums-item">
+    <a href="{{href}}">
+        <span class="separator" style="padding: 0 5px 0 5px;">/</span>
+        <span>{{label}}</span>
+    </a>
+</li>
+"###;
 
 /// response with partial content when body size larger than 50MB
 const RESPONSE_BODY_SIZE_LIMIT_IN_BYTES: u64 = 50 * 1024 * 1024;
@@ -317,7 +326,7 @@ pub(crate) async fn file_service(
             .replace("{{version}}", VERSION_STRING.as_str())
             .replace("{{header}}", "")
             .replace("{{title}}", "file not found")
-            .replace("{{file_list}}", "");
+            .replace("{{body}}", format!("file not found: {}", path).as_str());
 
         log_request(
             &request,
@@ -723,8 +732,8 @@ fn breadcrumbs(parent: &Path, root: &Path) -> String {
     let mut items = String::new();
     loop {
         items += String::from(BREADCRUMBS_ITEM)
-            .replace("{{link}}", link.as_str())
-            .replace("{{name}}", label.as_str())
+            .replace("{{href}}", link.as_str())
+            .replace("{{label}}", label.as_str())
             .as_str();
         if dirs.is_empty() {
             break;
@@ -769,8 +778,8 @@ mod tests {
         let mut items = String::new();
         for (link, label) in links {
             items += String::from(BREADCRUMBS_ITEM)
-                .replace("{{link}}", link)
-                .replace("{{name}}", label)
+                .replace("{{href}}", link)
+                .replace("{{label}}", label)
                 .as_str();
         }
         let expected = String::from(BREADCRUMBS_TEMPLATE).replace("{{items}}", items.as_str());
