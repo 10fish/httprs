@@ -441,7 +441,8 @@ impl Range {
                             ranges.push(Segment::RemainingSize(pair[1..].parse::<u64>().unwrap()));
                         } else if idx == pair.len() - 1 {
                             // Format: N- (from N to end)
-                            ranges.push(Segment::RemainingFrom(pair[..idx].parse::<u64>().unwrap()));
+                            ranges
+                                .push(Segment::RemainingFrom(pair[..idx].parse::<u64>().unwrap()));
                         } else {
                             // Format: N-M (from N to M)
                             let start = pair[..idx].parse::<u64>().unwrap();
@@ -472,16 +473,20 @@ impl Range {
             return;
         }
 
-        let filesize = self.filesize.expect("filesize must be set before combining segments");
-        
+        let filesize = self
+            .filesize
+            .expect("filesize must be set before combining segments");
+
         // Convert all segments to Regional type
-        let mut segments: Vec<Segment> = self.segments.iter().map(|seg| {
-            match seg {
+        let mut segments: Vec<Segment> = self
+            .segments
+            .iter()
+            .map(|seg| match seg {
                 Segment::RemainingSize(size) => Segment::Regional(filesize - size, filesize - 1),
                 Segment::RemainingFrom(start) => Segment::Regional(*start, filesize - 1),
                 Segment::Regional(start, end) => Segment::Regional(*start, *end),
-            }
-        }).collect();
+            })
+            .collect();
 
         // Sort segments by start position
         segments.sort_by(|a, b| {
@@ -668,7 +673,8 @@ impl AsyncRead for MultipartByteRanges {
 
         // end of processing
         let end_boundary = format!("--{}--\r\n", MULTIPART_BYTERANGES_MULTIPART_BOUNDARY);
-        if self.pos.0 == self.segments.len() && !self.pos.2 && buf.remaining() >= end_boundary.len() {
+        if self.pos.0 == self.segments.len() && !self.pos.2 && buf.remaining() >= end_boundary.len()
+        {
             buf.put_slice(end_boundary.as_bytes());
             self.pos.2 = true;
         }

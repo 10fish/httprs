@@ -208,7 +208,10 @@ mod test {
         assert!(!config.quiet);
         assert_eq!(config.host, Some(DEFAULT_HOST.to_string()));
         assert_eq!(config.port, Some(DEFAULT_PORT));
-        assert_eq!(config.root, Some(OsString::from_str(DEFAULT_ROOT_PATH).unwrap()));
+        assert_eq!(
+            config.root,
+            Some(OsString::from_str(DEFAULT_ROOT_PATH).unwrap())
+        );
     }
 
     #[test]
@@ -297,14 +300,8 @@ mod test {
 
     #[test]
     fn should_run_with_secure_mode() {
-        let config = Configuration::parse_from([
-            "",
-            "--secure",
-            "--cert",
-            "cert.pem",
-            "--key",
-            "key.pem",
-        ]);
+        let config =
+            Configuration::parse_from(["", "--secure", "--cert", "cert.pem", "--key", "key.pem"]);
         assert!(config.secure.as_ref().unwrap().secure);
         assert_eq!(
             config.secure.as_ref().unwrap().cert,
