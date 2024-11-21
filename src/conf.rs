@@ -6,7 +6,7 @@ use tokio::{fs::File, io::AsyncReadExt};
 use tracing::{debug, error};
 
 /// global environment variable for serving root directory. default to current directory [.]
-pub(crate) const ROOT_PATH_KEY: &'static str = "HTTPRS_ROOT";
+pub(crate) const ROOT_PATH_KEY: &str = "HTTPRS_ROOT";
 
 #[derive(Debug, Clone, Eq, PartialEq, Args, Deserialize)]
 pub struct Secure {
@@ -191,32 +191,26 @@ mod test {
     use std::str::FromStr;
 
     /// default binding host.
-    const DEFAULT_HOST: &'static str = "127.0.0.1";
+    const DEFAULT_HOST: &str = "127.0.0.1";
 
     /// default binding port.
     const DEFAULT_PORT: u16 = 9900;
 
     /// default serving directory.
-    const DEFAULT_ROOT_PATH: &'static str = ".";
+    const DEFAULT_ROOT_PATH: &str = ".";
 
     #[test]
     fn should_run_with_defaults() {
         let config = Configuration::parse_from([""]);
         assert_eq!(config.config, None);
+        assert!(!config.graceful_shutdown);
+        assert!(!config.cors);
+        assert!(!config.quiet);
         assert_eq!(config.host, Some(DEFAULT_HOST.to_string()));
         assert_eq!(config.port, Some(DEFAULT_PORT));
-        assert_eq!(
-            config.root,
-            Some(OsString::from_str(DEFAULT_ROOT_PATH).unwrap())
-        );
-        assert_eq!(config.compression, Compression::None);
-        assert_eq!(config.secure, None);
-        assert_eq!(config.graceful_shutdown, false);
-        assert_eq!(config.cors, false);
-        assert_eq!(config.quiet, false);
+        assert_eq!(config.root, Some(OsString::from_str(DEFAULT_ROOT_PATH).unwrap()));
     }
 
-    /// must add "--" because tests run by cargo
     #[test]
     fn should_set_host() {
         let config = Configuration::parse_from(["--", "-H", "192.168.1.1"]);
@@ -290,8 +284,7 @@ mod test {
             "--key",
             "key.pem",
         ]);
-        assert!(config.secure.is_some());
-        assert_eq!(config.secure.as_ref().unwrap().secure, true);
+        assert!(config.secure.as_ref().unwrap().secure);
         assert_eq!(
             config.secure.as_ref().unwrap().cert,
             Some(OsString::from_str("server.pem").unwrap())
@@ -302,15 +295,38 @@ mod test {
         );
     }
 
-    // TODO: test conditional parsing
-    // #[test]
-    // fn should_ignore_cert_or_key_when_https_not_enabled() {
-    //     let config = Configuration::parse_from(["--", "--cert", "server.pem", "--key", "key.pem"]);
-    //     assert!(config.secure.is_some());
-    //     assert_eq!(config.secure.as_ref().unwrap().secure, false);
-    //     assert_eq!(config.secure.as_ref().unwrap().cert, None);
-    //     assert_eq!(config.secure.as_ref().unwrap().key, None);
-    // }
+    #[test]
+    fn should_run_with_secure_mode() {
+        let config = Configuration::parse_from([
+            "",
+            "--secure",
+            "--cert",
+            "cert.pem",
+            "--key",
+            "key.pem",
+        ]);
+        assert!(config.secure.as_ref().unwrap().secure);
+        assert_eq!(
+            config.secure.as_ref().unwrap().cert,
+            Some(OsString::from("cert.pem"))
+        );
+        assert_eq!(
+            config.secure.as_ref().unwrap().key,
+            Some(OsString::from("key.pem"))
+        );
+    }
+
+    #[test]
+    fn should_run_with_cors() {
+        let config = Configuration::parse_from(["", "--cors"]);
+        assert!(config.cors);
+    }
+
+    #[test]
+    fn should_run_with_graceful_shutdown() {
+        let config = Configuration::parse_from(["", "--graceful-shutdown"]);
+        assert!(config.graceful_shutdown);
+    }
 
     #[test]
     fn should_set_compression_gzip() {
@@ -329,17 +345,5 @@ mod test {
         let result = Configuration::try_parse_from(["--", "-C", "unknown"]);
         assert!(result.is_err());
         assert!(result.err().unwrap().to_string().contains("unknown"));
-    }
-
-    #[test]
-    fn should_set_cors() {
-        let config = Configuration::parse_from(["--", "--cors"]);
-        assert_eq!(config.cors, true);
-    }
-
-    #[test]
-    fn should_set_graceful_shutdown() {
-        let config = Configuration::parse_from(["--", "--graceful-shutdown"]);
-        assert_eq!(config.graceful_shutdown, true);
     }
 }

@@ -1,79 +1,63 @@
-use crate::{DEFAULT_MIME_TYPE, MIME_TYPES, VERSION_STRING};
 use bytes::Bytes;
 use chrono::{DateTime, Local};
 use colored::Colorize;
 use futures_util::TryStreamExt;
 use http_body_util::{combinators::BoxBody, BodyExt, StreamBody};
-use hyper::{
-    body::{Frame, Incoming},
-    header,
-    header::HeaderValue,
-    header::RANGE,
-    Request, Response, StatusCode,
-};
+use hyper::body::{Frame, Incoming};
+use hyper::header::{self, HeaderValue, RANGE};
+use hyper::{Request, Response, StatusCode};
 use lazy_static::lazy_static;
 use regex::Regex;
-use std::{
-    cmp::{max, min},
-    convert::Infallible,
-    env,
-    ffi::OsString,
-    io::{Read, Seek, SeekFrom},
-    path::{Path, PathBuf},
-    pin::Pin,
-    task::{Context, Poll},
-    time::SystemTime,
-};
-use tokio::{
-    fs::File,
-    io::{AsyncRead, ReadBuf},
-};
+use std::cmp::min;
+use std::convert::Infallible;
+use std::env;
+use std::ffi::{OsStr, OsString};
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::SystemTime;
+use tokio::fs::File;
+use tokio::io::{AsyncRead, ReadBuf};
 use tokio_util::io::ReaderStream;
 use tracing::{debug, trace, warn, Level};
 use urlencoding::decode;
 use walkdir::WalkDir;
 
-const HTML_TEMPLATE: &'static str = include_str!("../static/index.html");
+use crate::{DEFAULT_MIME_TYPE, MIME_TYPES, VERSION_STRING};
 
-const FILE_LIST_TABLE_TEMPLATE: &'static str = r###"
-<table style="margin-left: 1em">
-    <thead style="font-style: italic;">
+const HTML_TEMPLATE: &str = include_str!("../static/index.html");
+
+const FILE_LIST_TABLE_TEMPLATE: &str = r###"
+<table>
+    <thead>
         <tr>
-            <td style="padding-right: 1em;">File Name</td>
-            <td style="padding-right: 1em;">Size</td>
-            <td style="padding-right: 1em;">Last Modified</td>
+            <th>Name</th>
+            <th>Size</th>
         </tr>
     </thead>
     <tbody>
-        {{filelist}}{{placeholder}}
+        {{file_list}}
     </tbody>
-</table>
-"###;
+</table>"###;
 
-const EMPTY_LIST: &'static str = "<tr><td><i>&lt;empty&gt;</i><td></tr>";
+const EMPTY_LIST: &str = "<tr><td><i>&lt;empty&gt;</i><td></tr>";
 
-const FILE_LIST_TABLE_ROW: &'static str = r###"
+const FILE_LIST_TABLE_ROW: &str = r###"
 <tr>
-    <td style="padding-right: 1em;"><a href="{{link}}">{{filename}}</a></td>
-    <td style="padding-right: 1em;">{{filesize}}</td>
-    <td style="padding-right: 1em;">{{modified}}</td>
-</tr>
-"###;
+    <td><a href="{{href}}">{{name}}</a></td>
+    <td>{{size}}</td>
+</tr>"###;
 
-const BREADCRUMBS_TEMPLATE: &'static str = r###"
-<ul id="breadcrumbs" style="display: flex;list-style: none;align-items: center;padding-inline: unset;margin-left: 1em;">
+const BREADCRUMBS_TEMPLATE: &str = r###"
+<div class="breadcrumbs">
     {{items}}
-</ul>
-"###;
+</div>"###;
 
-const BREADCRUMBS_ITEM: &'static str = r###"
-<li class="breadcrums-item">
-    <a href="{{link}}">
-        <span class="separator" style="padding: 0 5px 0 5px;">/</span>
-        <span>{{label}}</span>
-    </a>
-</li>
-"###;
+const BREADCRUMBS_ITEM: &str = r###"
+<span class="breadcrumb-item">
+    <a href="{{href}}">{{name}}</a>
+</span>"###;
 
 /// response with partial content when body size larger than 50MB
 const RESPONSE_BODY_SIZE_LIMIT_IN_BYTES: u64 = 50 * 1024 * 1024;
@@ -86,13 +70,13 @@ const RESPONSE_BODY_SIZE_LIMIT_IN_BYTES: u64 = 50 * 1024 * 1024;
 /// Range: <unit>=<range-start>-<range-end>, <range-start>-<range-end>, <range-start>-<range-end>
 /// Range: <unit>=-<suffix-length>
 /// ```
-const HEADER_RANGE_VALUE_REGEX: &'static str =
-    "^([\\w]+)\\s*=\\s*(-\\d+|\\d+-\\d+|\\d+-)(,\\s*(-\\d+|\\d+-\\d+|\\d+-))*";
-const RANGE_REGEX: &'static str = "((-\\d+)|(\\d+-\\d+)|(\\d+-))";
+const HEADER_RANGE_VALUE_REGEX: &str = r"^(bytes)=(.+)$";
 
-const DEFAULT_RANGE_UNIT: &'static str = "bytes";
-const DEFAULT_REQUEST_RANGE_VALUE: &'static str = "bytes=0-";
-const MULTIPART_BYTERANGES_MULTIPART_BOUNDARY: &'static str = "THIS_SEPARATES";
+const RANGE_REGEX: &str = r"(\d+-\d*|-\d+|\d+-\d+)";
+
+const DEFAULT_RANGE_UNIT: &str = "bytes";
+const DEFAULT_REQUEST_RANGE_VALUE: &str = "bytes=0-";
+const MULTIPART_BYTERANGES_MULTIPART_BOUNDARY: &str = "THIS_SEPARATES";
 
 lazy_static! {
     static ref HEADER_SERVER_VALUE: HeaderValue = HeaderValue::from_static(VERSION_STRING.as_str());
@@ -101,7 +85,7 @@ lazy_static! {
             "multipart/byteranges; boundary={}",
             MULTIPART_BYTERANGES_MULTIPART_BOUNDARY
         )
-        .as_str()
+        .as_str(),
     )
     .unwrap();
 }
@@ -183,20 +167,20 @@ pub(crate) async fn file_service(
                 let meta = &p.metadata().unwrap();
                 let modified: DateTime<Local> = meta.modified().unwrap().into();
                 file_list += String::from(FILE_LIST_TABLE_ROW)
-                    .replace("{{link}}", r_path)
-                    .replace("{{filename}}", p.file_name().to_str().unwrap())
-                    .replace("{{filesize}}", format!("{}", meta.len()).as_str())
+                    .replace("{{href}}", r_path)
+                    .replace("{{name}}", p.file_name().to_str().unwrap())
+                    .replace("{{size}}", format!("{}", meta.len()).as_str())
                     .replace(
                         "{{modified}}",
                         modified.format("%b %d %Y - %H:%M").to_string().as_str(),
                     )
                     .as_str();
             }
-            if file_list != "" {
+            if !file_list.is_empty() {
                 empty_content = "";
             }
             let html_body = String::from(FILE_LIST_TABLE_TEMPLATE)
-                .replace("{{filelist}}", file_list.as_str())
+                .replace("{{file_list}}", file_list.as_str())
                 .replace("{{placeholder}}", empty_content);
 
             let response_body = HTML_TEMPLATE
@@ -223,7 +207,7 @@ pub(crate) async fn file_service(
                 .unwrap())
         } else {
             // Resolve file extension to HTTP Content-Type
-            let content_type = resolve_content_type(Box::new(path));
+            let content_type = resolve_content_type(path);
             let decoded_path = decode(full_path.to_str().unwrap()).unwrap().to_string();
             let file = File::open(decoded_path).await.expect("read file error");
             let file_size = get_size_bytes(&file).await;
@@ -232,7 +216,7 @@ pub(crate) async fn file_service(
                 let default_range = HeaderValue::from_static(DEFAULT_REQUEST_RANGE_VALUE);
                 let range_header = request.headers().get(RANGE).unwrap_or(&default_range);
                 let mut range = Range::from(range_header);
-                range.adjust(file_size).combine_all();
+                range.adjust(file_size).combine_segments();
 
                 // debug only
                 if tracing::enabled!(Level::TRACE) {
@@ -332,8 +316,8 @@ pub(crate) async fn file_service(
         let response_body = HTML_TEMPLATE
             .replace("{{version}}", VERSION_STRING.as_str())
             .replace("{{header}}", "")
-            .replace("{{title}}", format!("{}", "file not found").as_str())
-            .replace("{{body}}", format!("file not found: {}", path).as_str());
+            .replace("{{title}}", "file not found")
+            .replace("{{file_list}}", "");
 
         log_request(
             &request,
@@ -348,13 +332,12 @@ pub(crate) async fn file_service(
     }
 }
 
-fn resolve_content_type(path: Box<&str>) -> &'static str {
-    if let Some((_, ext)) = path.rsplit_once('.') {
-        if let Some(mime) = MIME_TYPES.get(ext) {
-            return mime;
-        }
-    }
-    DEFAULT_MIME_TYPE
+fn resolve_content_type(path: &str) -> &'static str {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(OsStr::to_str)
+        .unwrap_or("");
+    MIME_TYPES.get(ext).unwrap_or(&DEFAULT_MIME_TYPE)
 }
 
 async fn read_segment(path: &Path, seg: &Segment) -> (FileSegment, u64, HeaderValue) {
@@ -449,20 +432,21 @@ impl Range {
             Some(caps) => {
                 unit = String::from(caps.get(1).unwrap().as_str());
                 let range_regex = Regex::new(RANGE_REGEX).unwrap();
-                for m in range_regex.find_iter(range) {
+                for m in range_regex.find_iter(caps.get(2).unwrap().as_str()) {
                     let pair = m.as_str();
                     if pair.contains('-') {
                         let idx = pair.find('-').unwrap();
                         if idx == 0 {
+                            // Format: -N (last N bytes)
                             ranges.push(Segment::RemainingSize(pair[1..].parse::<u64>().unwrap()));
                         } else if idx == pair.len() - 1 {
-                            ranges
-                                .push(Segment::RemainingFrom(pair[..idx].parse::<u64>().unwrap()));
+                            // Format: N- (from N to end)
+                            ranges.push(Segment::RemainingFrom(pair[..idx].parse::<u64>().unwrap()));
                         } else {
-                            ranges.push(Segment::Regional(
-                                pair[..idx].parse::<u64>().unwrap(),
-                                pair[idx + 1..].parse::<u64>().unwrap(),
-                            ));
+                            // Format: N-M (from N to M)
+                            let start = pair[..idx].parse::<u64>().unwrap();
+                            let end = pair[idx + 1..].parse::<u64>().unwrap();
+                            ranges.push(Segment::Regional(start, end));
                         }
                     }
                 }
@@ -483,94 +467,72 @@ impl Range {
     }
 
     /// sort range pairs, remove overlapped ones if exist
-    fn combine_all(&mut self) {
-        if self.segments.len() < 1 || self.combined {
+    fn combine_segments(&mut self) {
+        if self.segments.is_empty() {
             return;
         }
-        // sort RangeValue by start, and combine that overlapped
-        let mut regions: Vec<(u64, u64)> = self
-            .segments
-            .iter()
-            .map(|rv| match rv {
-                Segment::RemainingFrom(start) => (
-                    min(*start, self.filesize.unwrap() - 1),
-                    self.filesize.unwrap() - 1,
-                ),
-                Segment::Regional(start, end) => {
-                    if start > end {
-                        return (0, 0);
-                    } else {
-                        (
-                            min(*start, self.filesize.unwrap() - 1),
-                            min(*end, self.filesize.unwrap() - 1),
-                        )
-                    }
-                }
-                Segment::RemainingSize(size) => (
-                    min(
-                        max(0, self.filesize.unwrap() - size),
-                        self.filesize.unwrap() - 1,
-                    ),
-                    self.filesize.unwrap() - 1,
-                ),
-            })
-            .collect();
-        regions.sort_by(|l, r| {
-            if l.0 == r.0 {
-                return l.1.cmp(&r.1);
+
+        let filesize = self.filesize.expect("filesize must be set before combining segments");
+        
+        // Convert all segments to Regional type
+        let mut segments: Vec<Segment> = self.segments.iter().map(|seg| {
+            match seg {
+                Segment::RemainingSize(size) => Segment::Regional(filesize - size, filesize - 1),
+                Segment::RemainingFrom(start) => Segment::Regional(*start, filesize - 1),
+                Segment::Regional(start, end) => Segment::Regional(*start, *end),
+            }
+        }).collect();
+
+        // Sort segments by start position
+        segments.sort_by(|a, b| {
+            if let (Segment::Regional(a_start, _), Segment::Regional(b_start, _)) = (a, b) {
+                a_start.cmp(b_start)
             } else {
-                l.0.cmp(&r.0)
+                unreachable!("all segments should be Regional at this point")
             }
         });
 
-        let mut ranges = vec![];
-        let mut r = regions[0].clone();
-        for i in 1..regions.len() {
-            if Self::overlapping(&r, &regions[i]) {
-                r = *Self::combine(&mut r, &regions[i])
-            } else {
-                ranges.push(Segment::Regional(r.0, r.1));
-                r = regions[i].clone();
+        let mut combined = Vec::new();
+        let mut current = if let Segment::Regional(start, end) = segments[0] {
+            (start, end)
+        } else {
+            unreachable!("all segments should be Regional at this point")
+        };
+
+        for segment in segments.iter().skip(1) {
+            if let Segment::Regional(start, end) = segment {
+                if current.1 + 1 >= *start {
+                    // Ranges overlap or are adjacent, merge them
+                    current.1 = current.1.max(*end);
+                } else {
+                    // No overlap, add current range and start a new one
+                    combined.push(Segment::Regional(current.0, current.1));
+                    current = (*start, *end);
+                }
             }
         }
-        ranges.push(Segment::Regional(r.0, r.1));
-        self.segments = ranges;
+        combined.push(Segment::Regional(current.0, current.1));
+
+        self.segments = combined;
         self.combined = true;
-    }
-
-    /// check if two segments are overlapping.
-    fn overlapping(left: &(u64, u64), right: &(u64, u64)) -> bool {
-        (left.0 >= right.0 && left.0 <= right.1)
-            || (left.1 >= right.0 && left.1 <= right.1)
-            || (right.0 >= left.0 && right.0 <= left.1)
-            || (right.1 >= left.0 && right.1 <= left.1)
-    }
-
-    /// combine two segments if they are overlapping, or return the first one if not.
-    fn combine<'a>(left: &'a mut (u64, u64), right: &'a (u64, u64)) -> &'a (u64, u64) {
-        if Self::overlapping(left, right) {
-            *left = (min(left.0, right.0), max(left.1, right.1));
-        } else {
-            warn!(
-                "range is not overlapping with parameter, staying not combined: {:?} <-> {:?}",
-                left, right
-            );
-        }
-        left
     }
 
     /// check if http body should be multipart byte-ranges form or normal form
     fn multipart(&mut self) -> bool {
         if !self.combined {
-            self.combine_all();
+            self.combine_segments();
         }
         self.segments.len() > 1
     }
 
     /// check if the range actually covers the full file.
     fn integrality(&self) -> bool {
-        self.segments.len() < 1
+        self.segments.is_empty()
             || self.segments[0].eq(&Segment::Regional(0, self.filesize.unwrap() - 1))
+    }
+
+    fn is_valid(&self) -> bool {
+        !self.segments.is_empty()
     }
 }
 
@@ -590,6 +552,64 @@ impl AsyncRead for FileSegment {
         self_mut.offset += segment_size as u64;
         self_mut.size -= segment_size as u64;
         Poll::Ready(Ok(()))
+    }
+}
+
+impl MultipartByteRanges {
+    fn new(file: &Path, content_type: &str, range_values: &[Segment]) -> Self {
+        Self {
+            file: PathBuf::from(file),
+            content_type: String::from(content_type),
+            segments: range_values
+                .iter()
+                .map(|v| match v {
+                    Segment::Regional(from, to) => (*from, (*to - *from + 1)),
+                    Segment::RemainingFrom(_) | Segment::RemainingSize(_) => (0, 0),
+                })
+                .collect(),
+            pos: (0, 0, false),
+        }
+    }
+
+    fn segment_required_length(&self, part_headers: &[u8]) -> u64 {
+        let next_seg_len = self.segments[self.pos.0].1;
+        // +2 because part should add en extra '\r\n' after the bytes array load
+        if self.pos.1 == 0 {
+            part_headers.len() as u64 + next_seg_len + 2
+        } else {
+            next_seg_len + 2
+        }
+    }
+
+    fn fill_part_headers(&self, filesize: u64) -> Vec<u8> {
+        let segment = self.segments[self.pos.0];
+        let mut part_buf = String::new();
+        part_buf.push_str(format!("--{}\r\n", MULTIPART_BYTERANGES_MULTIPART_BOUNDARY).as_str());
+        part_buf.push_str(format!("Content-Type: {}\r\n", self.content_type).as_str());
+        part_buf.push_str(
+            format!(
+                "Content-Range: {} {}-{}/{}\r\n",
+                DEFAULT_RANGE_UNIT,
+                segment.0,
+                segment.0 + segment.1 - 1,
+                filesize
+            )
+            .as_str(),
+        );
+        part_buf.push_str(format!("Content-Length: {}\r\n", segment.1).as_str());
+        part_buf.push_str("\r\n");
+        part_buf.into_bytes()
+    }
+
+    fn get_segment_size(&self) -> Option<(u64, u64)> {
+        self.segments.get(self.pos.0).map(|segment| {
+            let remaining = segment.1 - self.pos.1;
+            if remaining > 0 {
+                (segment.0 + self.pos.1, remaining)
+            } else {
+                (0, 0)
+            }
+        })
     }
 }
 
@@ -648,64 +668,11 @@ impl AsyncRead for MultipartByteRanges {
 
         // end of processing
         let end_boundary = format!("--{}--\r\n", MULTIPART_BYTERANGES_MULTIPART_BOUNDARY);
-        if self.pos.0 == self.segments.len() && !self.pos.2 {
-            if buf.remaining() >= end_boundary.len() {
-                buf.put_slice(end_boundary.as_bytes());
-                self.pos.2 = true;
-            }
+        if self.pos.0 == self.segments.len() && !self.pos.2 && buf.remaining() >= end_boundary.len() {
+            buf.put_slice(end_boundary.as_bytes());
+            self.pos.2 = true;
         }
         Poll::Ready(Ok(()))
-    }
-}
-
-impl MultipartByteRanges {
-    fn new(file: &Path, content_type: &str, range_values: &Vec<Segment>) -> Self {
-        Self {
-            file: PathBuf::from(file),
-            content_type: String::from(content_type),
-            segments: range_values
-                .iter()
-                .map(|v| match v {
-                    Segment::Regional(from, to) => (*from, (*to - *from + 1)),
-                    Segment::RemainingFrom(_) | Segment::RemainingSize(_) => (0, 0),
-                })
-                .collect(),
-            pos: (0, 0, false),
-        }
-    }
-    fn segment_required_length(&self, part_headers: &Vec<u8>) -> u64 {
-        let segment = self.segments[self.pos.0];
-
-        // next part size subtract the size already cached
-        let next_seg_len = segment.1 - self.pos.1;
-
-        // +2 because part should add en extra '\r\n' after the bytes array load
-        let capacity_needed = if self.pos.1 == 0 {
-            part_headers.len() as u64 + next_seg_len + 2
-        } else {
-            next_seg_len + 2
-        };
-        capacity_needed
-    }
-
-    fn fill_part_headers(&self, filesize: u64) -> Vec<u8> {
-        let segment = self.segments[self.pos.0];
-        let mut part_buf = String::new();
-        part_buf.push_str(format!("--{}\r\n", MULTIPART_BYTERANGES_MULTIPART_BOUNDARY).as_str());
-        part_buf.push_str(format!("Content-Type: {}\r\n", self.content_type).as_str());
-        part_buf.push_str(
-            format!(
-                "Content-Range: {} {}-{}/{}\r\n",
-                DEFAULT_RANGE_UNIT,
-                segment.0,
-                segment.0 + segment.1 - 1,
-                filesize
-            )
-            .as_str(),
-        );
-        part_buf.push_str(format!("Content-Length: {}\r\n", segment.1).as_str());
-        part_buf.push_str("\r\n");
-        part_buf.into_bytes()
     }
 }
 
@@ -750,7 +717,7 @@ fn breadcrumbs(parent: &Path, root: &Path) -> String {
     loop {
         items += String::from(BREADCRUMBS_ITEM)
             .replace("{{link}}", link.as_str())
-            .replace("{{label}}", label.as_str())
+            .replace("{{name}}", label.as_str())
             .as_str();
         if dirs.is_empty() {
             break;
@@ -796,7 +763,7 @@ mod tests {
         for (link, label) in links {
             items += String::from(BREADCRUMBS_ITEM)
                 .replace("{{link}}", link)
-                .replace("{{label}}", label)
+                .replace("{{name}}", label)
                 .as_str();
         }
         let expected = String::from(BREADCRUMBS_TEMPLATE).replace("{{items}}", items.as_str());
@@ -847,34 +814,34 @@ mod tests {
     #[test]
     fn should_parse_range0() {
         let range_header = HeaderValue::from_static("bytes=1024-65535");
-        let expected_ranges = vec![Segment::Regional(1024, 65535)];
-        let range = Range::from(&range_header);
-        assert_eq!(range.unit, String::from("bytes"));
-        assert_eq!(range.segments[0], expected_ranges[0]);
+        let expected_ranges = [Segment::Regional(1024, 65535)];
+        let actual = Range::from(&range_header);
+        assert_eq!(actual.unit, String::from("bytes"));
+        assert_eq!(actual.segments[0], expected_ranges[0]);
     }
 
     #[test]
     fn should_parse_range1() {
         let range_header = HeaderValue::from_static("bytes=-1024, 23345-");
-        let expected_ranges = vec![Segment::RemainingSize(1024), Segment::RemainingFrom(23345)];
-        let range = Range::from(&range_header);
-        assert_eq!(range.unit, String::from("bytes"));
-        assert_eq!(range.segments, expected_ranges);
+        let expected_ranges = [Segment::RemainingSize(1024), Segment::RemainingFrom(23345)];
+        let actual = Range::from(&range_header);
+        assert_eq!(actual.unit, String::from("bytes"));
+        assert_eq!(actual.segments, expected_ranges);
     }
 
     #[test]
     fn should_parse_range2() {
         let range_header = HeaderValue::from_static("bytes=1-12, 102400-, 12-24,24-96,96-1024");
-        let expected_ranges = vec![
+        let expected_ranges = [
             Segment::Regional(1, 12),
             Segment::RemainingFrom(102400),
             Segment::Regional(12, 24),
             Segment::Regional(24, 96),
             Segment::Regional(96, 1024),
         ];
-        let range = Range::from(&range_header);
-        assert_eq!(range.unit, String::from("bytes"));
-        assert_eq!(range.segments, expected_ranges);
+        let actual = Range::from(&range_header);
+        assert_eq!(actual.unit, String::from("bytes"));
+        assert_eq!(actual.segments, expected_ranges);
     }
 
     #[test]
@@ -895,7 +862,7 @@ mod tests {
             Segment::Regional(1024, TEST_FILE_SIZE - 1),
         ];
 
-        range.adjust(TEST_FILE_SIZE).combine_all();
+        range.adjust(TEST_FILE_SIZE).combine_segments();
 
         assert_eq!(
             range, expected,
@@ -912,7 +879,7 @@ mod tests {
         expected.filesize = Some(TEST_FILE_SIZE);
         expected.segments = vec![Segment::Regional(512, TEST_FILE_SIZE - 1)];
 
-        range.adjust(TEST_FILE_SIZE).combine_all();
+        range.adjust(TEST_FILE_SIZE).combine_segments();
 
         assert_eq!(
             range, expected,
@@ -940,7 +907,7 @@ mod tests {
             Segment::Regional(10240, TEST_FILE_SIZE - 1),
         ];
 
-        range.adjust(TEST_FILE_SIZE).combine_all();
+        range.adjust(TEST_FILE_SIZE).combine_segments();
 
         assert_eq!(
             range, expected,
@@ -957,5 +924,12 @@ mod tests {
         // let actual = stream.read_to_end(&mut buf).await;
         // assert!(actual.is_ok());
         // assert_eq!(actual.unwrap(), text.len());
+    }
+
+    #[test]
+    fn test_parse_range_values() {
+        let expected_ranges = [Segment::Regional(1024, 65535)];
+        let actual = Range::from(&HeaderValue::from_static("bytes=1024-65535")).segments;
+        assert_eq!(actual, expected_ranges);
     }
 }
