@@ -32,7 +32,7 @@ jobs:
           components: rustfmt, clippy
           
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.7.1
+        uses: Swatinem/rust-cache@v2.7.2
         
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -53,7 +53,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         
       - name: Rust Cache
-        uses: Swatinem/rust-cache@v2.7.1
+        uses: Swatinem/rust-cache@v2.7.2
         
       - name: Build
         run: cargo build --verbose --release
