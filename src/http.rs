@@ -606,6 +606,7 @@ impl MultipartByteRanges {
         part_buf.into_bytes()
     }
 
+    #[allow(dead_code)]
     fn get_segment_size(&self) -> Option<(u64, u64)> {
         self.segments.get(self.pos.0).map(|segment| {
             let remaining = segment.1 - self.pos.1;
