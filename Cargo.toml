@@ -15,7 +15,7 @@ include = ["src/**/*", "static/**/*", "Cargo.toml", "COPYRIGHT", "LICENSE", "REA
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tokio = { version = "^1.36", features = ["full"] }
+tokio = { version = "^1.38", features = ["full"] }
 hyper = { version = "1", features = ["full"] }
 http-body-util = "0.1"
 hyper-util = { version = "0.1", features = ["full"] }
@@ -27,11 +27,11 @@ toml = "0.8"
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-bytes = "^1.8"
+bytes = "^1.10"
 urlencoding = "2"
 tokio-util = { version = "0.7", features = ["rt"] }
 futures-util = "0.3"
-regex = "^1.7"
+regex = "^1.9"
 serde = { version = "1", features = ["derive"] }
 lazy_static = "1"
 chrono = "0.4"
