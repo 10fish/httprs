@@ -2,11 +2,11 @@
 name = "httprs"
 description = "A fast simple command line http server tool"
 version = "0.2.4"
-edition = "2021"
+edition = "2024"
 authors = ["10fish <jokefish@live.com>"]
 license-file = "LICENSE"
 repository = "https://github.com/10fish/httprs"
-rust-version = "1.64.0"
+rust-version = "1.85.0"
 documentation = "https://docs.rs/httprs"
 readme = "README.md"
 keywords = ["http", "server", "static", "tls", "partial_content"]
@@ -15,14 +15,14 @@ include = ["src/**/*", "static/**/*", "Cargo.toml", "COPYRIGHT", "LICENSE", "REA
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tokio = { version = "^1.38", features = ["full"] }
+tokio = { version = "^1.45", features = ["full"] }
 hyper = { version = "1", features = ["full"] }
 http-body-util = "0.1"
 hyper-util = { version = "0.1", features = ["full"] }
 
 walkdir = "2"
 clap = { version = "^4", features = ["derive", "wrap_help"] }
-colored = "^2"
+colored = "^3"
 toml = "0.8"
 
 tracing = "0.1"

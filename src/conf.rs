@@ -173,7 +173,9 @@ impl Configuration {
 
     pub(crate) fn set_env(&self) {
         let root_path = self.root.as_ref().unwrap();
-        env::set_var(ROOT_PATH_KEY, PathBuf::from(&root_path).as_path());
+        unsafe {
+            env::set_var(ROOT_PATH_KEY, PathBuf::from(&root_path).as_path());
+        }
         debug!(
             "Setting ROOT_PATH environment variable to {}",
             root_path.to_str().unwrap()
