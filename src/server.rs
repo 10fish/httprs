@@ -95,8 +95,8 @@ impl Server {
     fn https_acceptor(&self) -> Option<TlsAcceptor> {
         if self.configuration.secure.is_some() {
             let conf_dup = self.configuration.clone();
-            let cert_file = conf_dup.as_ref().clone().secure.unwrap().cert.unwrap();
-            let key_file = conf_dup.as_ref().clone().secure.unwrap().key.unwrap();
+            let cert_file = conf_dup.as_ref().clone().secure.unwrap().cert;
+            let key_file = conf_dup.as_ref().clone().secure.unwrap().key;
             let certs = CertificateDer::pem_file_iter(cert_file)
                 .unwrap()
                 .map(|cert| cert.unwrap())

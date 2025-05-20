@@ -138,7 +138,7 @@ pub(crate) async fn file_service(
     let timer = SystemTime::now();
     let path = request.uri().path();
     let root =
-        env::var(super::conf::ROOT_PATH_KEY).expect("environment variable HTTPRS_ROOT not set!");
+        env::var(super::conf::HOME_PATH_KEY).expect("environment variable HTTPRS_HOME not set!");
     let root_path = PathBuf::from(root);
     // strip the prefix of '/' because path join will get to system root if not
     let full_path = root_path.join(decode(path).unwrap().strip_prefix("/").unwrap());

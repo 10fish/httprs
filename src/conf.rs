@@ -1,3 +1,4 @@
+use clap::builder::ArgPredicate;
 use clap::{Args, Parser, ValueEnum};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -6,35 +7,39 @@ use tokio::{fs::File, io::AsyncReadExt};
 use tracing::{debug, error};
 
 /// global environment variable for serving root directory. default to current directory [.]
-pub(crate) const ROOT_PATH_KEY: &str = "HTTPRS_ROOT";
+pub(crate) const HOME_PATH_KEY: &str = "HTTPRS_HOME";
 
 #[derive(Debug, Clone, Eq, PartialEq, Args, Deserialize)]
 pub struct Secure {
     /// enable https mode, adds an TLS layer for data transfer between server and clients
-    #[arg(long, requires = "cert", requires = "key")]
+    #[arg(
+        long,
+        action,
+        required = false,
+        requires_if(ArgPredicate::IsPresent, "cert"),
+        requires_if(ArgPredicate::IsPresent, "key")
+    )]
     pub secure: bool,
 
     /// cert file path for server in https mode
-    #[arg(long)]
-    pub cert: Option<OsString>,
+    #[arg(long, required = false)]
+    pub cert: OsString,
 
     /// private key file path for server in https mode
-    #[arg(long)]
-    pub key: Option<OsString>,
+    #[arg(long, required = false)]
+    pub key: OsString,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Default, ValueEnum, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq, ValueEnum, Deserialize)]
 #[clap(rename_all = "snake_case")]
 pub enum Compression {
-    #[default]
-    None,
     Gzip,
     Deflate,
     Other,
 }
 
 #[derive(Debug, Clone, Parser, Deserialize)]
-#[command(name = "httprs", author = "10fish", version = "0.2.3")]
+#[command(name = "httprs", author = "10fish", version = "0.2.4")]
 #[command(version, about, long_about = None, after_long_help = "./after-help.md")]
 pub struct Configuration {
     /// Path of configuration file.
@@ -51,14 +56,14 @@ pub struct Configuration {
 
     /// Base directory, default to current directory where service starts.
     #[arg(default_value = ".")]
-    pub root: Option<OsString>,
+    pub home: Option<OsString>,
 
     /// Enable Cross-Origin Resource Sharing allowing any origin.
     #[arg(long)]
     pub cors: bool,
 
     /// Enable gracefully shutting down the running server.
-    #[arg(short, long)]
+    #[arg(short, long, action)]
     pub graceful_shutdown: bool,
 
     /// Enable data transmission security between server and clients(HTTPS/TLS).
@@ -66,11 +71,11 @@ pub struct Configuration {
     pub secure: Option<Secure>,
 
     /// Enable data compression between server and clients.
-    #[arg(short = 'C', long, default_value = "none")]
-    pub compression: Compression,
+    #[arg(short = 'C', long)]
+    pub compression: Option<Compression>,
 
     /// Enable server run in silent mode
-    #[arg(short, long)]
+    #[arg(short, long, action)]
     pub quiet: bool,
 }
 
@@ -121,8 +126,8 @@ impl Configuration {
         if self.port.is_some() {
             conf.port = self.port;
         }
-        if self.root.is_some() {
-            conf.root = self.root;
+        if self.home.is_some() {
+            conf.home = self.home;
         }
         conf.config = self.config;
         conf.quiet |= self.quiet;
@@ -154,7 +159,7 @@ impl Configuration {
                 .unwrap_or(&OsString::from("-"))
                 .to_str()
                 .unwrap(),
-            self.root.as_ref().unwrap().to_str().unwrap(),
+            self.home.as_ref().unwrap().to_str().unwrap(),
             self.cors,
             self.compression,
             self.graceful_shutdown,
@@ -172,13 +177,13 @@ impl Configuration {
     }
 
     pub(crate) fn set_env(&self) {
-        let root_path = self.root.as_ref().unwrap();
+        let home_path = self.home.as_ref().unwrap();
         unsafe {
-            env::set_var(ROOT_PATH_KEY, PathBuf::from(&root_path).as_path());
+            env::set_var(HOME_PATH_KEY, PathBuf::from(&home_path).as_path());
         }
         debug!(
-            "Setting ROOT_PATH environment variable to {}",
-            root_path.to_str().unwrap()
+            "Setting HTTPRS_HOME environment variable to {}",
+            home_path.to_str().unwrap()
         );
     }
 }
@@ -186,8 +191,8 @@ impl Configuration {
 #[cfg(test)]
 mod test {
     use crate::conf::{Compression, Configuration};
-    use clap::error::ErrorKind::MissingRequiredArgument;
     use clap::Parser;
+    use clap::error::ErrorKind::MissingRequiredArgument;
     use regex::Regex;
     use std::ffi::OsString;
     use std::str::FromStr;
@@ -211,7 +216,7 @@ mod test {
         assert_eq!(config.host, Some(DEFAULT_HOST.to_string()));
         assert_eq!(config.port, Some(DEFAULT_PORT));
         assert_eq!(
-            config.root,
+            config.home,
             Some(OsString::from_str(DEFAULT_ROOT_PATH).unwrap())
         );
     }
@@ -292,11 +297,11 @@ mod test {
         assert!(config.secure.as_ref().unwrap().secure);
         assert_eq!(
             config.secure.as_ref().unwrap().cert,
-            Some(OsString::from_str("server.pem").unwrap())
+            OsString::from_str("server.pem").unwrap()
         );
         assert_eq!(
             config.secure.as_ref().unwrap().key,
-            Some(OsString::from_str("key.pem").unwrap())
+            OsString::from_str("key.pem").unwrap()
         );
     }
 
@@ -307,11 +312,11 @@ mod test {
         assert!(config.secure.as_ref().unwrap().secure);
         assert_eq!(
             config.secure.as_ref().unwrap().cert,
-            Some(OsString::from("cert.pem"))
+            OsString::from("cert.pem")
         );
         assert_eq!(
             config.secure.as_ref().unwrap().key,
-            Some(OsString::from("key.pem"))
+            OsString::from("key.pem")
         );
     }
 
@@ -330,13 +335,13 @@ mod test {
     #[test]
     fn should_set_compression_gzip() {
         let config = Configuration::parse_from(["--", "-C", "gzip"]);
-        assert_eq!(config.compression, Compression::Gzip);
+        assert_eq!(config.compression, Some(Compression::Gzip));
     }
 
     #[test]
     fn should_set_compression_deflate() {
         let config = Configuration::parse_from(["--", "-C", "deflate"]);
-        assert_eq!(config.compression, Compression::Deflate);
+        assert_eq!(config.compression, Some(Compression::Deflate));
     }
 
     #[test]
