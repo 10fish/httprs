@@ -24,6 +24,68 @@ the main features are as followings, and certainly more will be added:
 - colored logs
 - partial content support
 
+### HTTP Server Standards & Benchmarks
+
+#### Implemented Features
+
+1. HTTP/1.1 Standard Support:
+- ✅ Basic HTTP/1.1 protocol support
+- ✅ Standard HTTP methods
+- ✅ Standard HTTP headers
+- ✅ Status codes
+
+2. Performance Features:
+- ✅ Asynchronous I/O (using tokio)
+- ✅ Chunked file transfer (Range request support)
+- ✅ Static file serving
+- ✅ Directory listing
+- ✅ Graceful shutdown
+
+3. Security Features:
+- ✅ HTTPS support (TLS/SSL)
+- ✅ Basic error handling
+- ✅ Request logging
+
+4. Functional Features:
+- ✅ MIME type support
+- ✅ File system navigation
+- ✅ Breadcrumb navigation
+- ✅ Response time tracking
+
+#### Planned Features
+
+1. HTTP Standards:
+- ⏳ HTTP/2 support
+- ⏳ HTTP/3 support
+- ⏳ WebSocket support
+- ⏳ Compression support (gzip, deflate)
+
+2. Performance Optimizations:
+- ⏳ Connection pool management
+- ⏳ Cache control
+- ⏳ Compression transmission
+- ⏳ Load balancing
+- ⏳ Request rate limiting
+
+3. Security Enhancements:
+- ⏳ CORS support
+- ⏳ Security headers (HSTS, etc.)
+- ⏳ Request validation
+- ⏳ Access control
+
+4. Advanced Features:
+- ⏳ Dynamic content generation
+- ⏳ Session management
+- ⏳ Authentication & Authorization
+- ⏳ API support
+- ⏳ Reverse proxy
+
+5. Monitoring & Management:
+- ⏳ Performance metrics collection
+- ⏳ Health checks
+- ⏳ Management interface
+- ⏳ Hot reload configuration
+
 ### Installation
 Download pre-built binaries from [release](https://github.com/10fish/httprs/releases) page.
 
