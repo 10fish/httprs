@@ -5,7 +5,12 @@ mod http;
 mod mime;
 mod server;
 
+pub use conf::Compression;
 pub use conf::Configuration;
+pub use http::{
+    BREADCRUMBS_ITEM, BREADCRUMBS_TEMPLATE, HEADER_RANGE_VALUE_REGEX, MultipartByteRanges, Range,
+    Segment, breadcrumbs, get_all_local_ips,
+};
 pub(crate) use mime::{DEFAULT_MIME_TYPE, MIME_TYPES};
 pub use server::Server;
 

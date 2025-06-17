@@ -2,7 +2,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Local};
 use colored::Colorize;
 use futures_util::TryStreamExt;
-use http_body_util::{combinators::BoxBody, BodyExt, StreamBody};
+use http_body_util::{BodyExt, StreamBody, combinators::BoxBody};
 use hyper::body::{Frame, Incoming};
 use hyper::header::{self, HeaderValue, RANGE};
 use hyper::{Request, Response, StatusCode};
@@ -21,7 +21,7 @@ use std::time::SystemTime;
 use tokio::fs::File;
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio_util::io::ReaderStream;
-use tracing::{debug, trace, warn, Level};
+use tracing::{Level, debug, trace, warn};
 use urlencoding::decode;
 use walkdir::WalkDir;
 
@@ -54,13 +54,13 @@ const FILE_LIST_TABLE_ROW: &str = r###"
 </tr>
 "###;
 
-const BREADCRUMBS_TEMPLATE: &str = r###"
+pub const BREADCRUMBS_TEMPLATE: &str = r###"
 <ul id="breadcrumbs" style="display: flex;list-style: none;align-items: center;padding-inline: unset;margin-left: 1em;">
     {{items}}
 </ul>
 "###;
 
-const BREADCRUMBS_ITEM: &str = r###"
+pub const BREADCRUMBS_ITEM: &str = r###"
 <li class="breadcrums-item">
     <a href="{{href}}">
         <span class="separator" style="padding: 0 5px 0 5px;">/</span>
@@ -80,7 +80,7 @@ const RESPONSE_BODY_SIZE_LIMIT_IN_BYTES: u64 = 50 * 1024 * 1024;
 /// Range: <unit>=<range-start>-<range-end>, <range-start>-<range-end>, <range-start>-<range-end>
 /// Range: <unit>=-<suffix-length>
 /// ```
-const HEADER_RANGE_VALUE_REGEX: &str = r"^(bytes)=(.+)$";
+pub const HEADER_RANGE_VALUE_REGEX: &str = r"^(bytes)=(.+)$";
 
 const RANGE_REGEX: &str = r"(\d+-\d*|-\d+|\d+-\d+)";
 
@@ -102,7 +102,7 @@ lazy_static! {
 
 /// consists of a range with a start or an end(if not, it means to the start or end of the target file).
 #[derive(Debug, PartialEq, Eq, Clone)]
-enum Segment {
+pub enum Segment {
     RemainingFrom(u64),
     Regional(u64, u64),
     RemainingSize(u64),
@@ -110,11 +110,11 @@ enum Segment {
 
 /// represents the HTTP Request Header value of `header::RANGE`.
 #[derive(Debug, PartialEq, Eq, Clone)]
-struct Range {
-    unit: String,
-    segments: Vec<Segment>,
-    combined: bool,
-    filesize: Option<u64>,
+pub struct Range {
+    pub unit: String,
+    pub segments: Vec<Segment>,
+    pub combined: bool,
+    pub filesize: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -125,11 +125,340 @@ struct FileSegment {
 }
 
 #[derive(Debug)]
-struct MultipartByteRanges {
+pub struct MultipartByteRanges {
     file: PathBuf,
     content_type: String,
     segments: Vec<(u64, u64)>,
     pos: (usize, u64, bool),
+}
+
+#[allow(dead_code)]
+impl Range {
+    pub fn new() -> Self {
+        Self {
+            unit: DEFAULT_RANGE_UNIT.to_string(),
+            segments: vec![],
+            combined: false,
+            filesize: None,
+        }
+    }
+
+    /// parse value from http header value.
+    pub fn from(val: &HeaderValue) -> Self {
+        let range = val.to_str().unwrap();
+        let mut unit: String = String::from(DEFAULT_RANGE_UNIT);
+        let mut ranges = vec![];
+        let regex = Regex::new(HEADER_RANGE_VALUE_REGEX).unwrap();
+        match regex.captures(range) {
+            None => {
+                warn!("not a valid HTTP Range header value: {}", range);
+            }
+            Some(caps) => {
+                unit = String::from(caps.get(1).unwrap().as_str());
+                let range_regex = Regex::new(RANGE_REGEX).unwrap();
+                for m in range_regex.find_iter(caps.get(2).unwrap().as_str()) {
+                    let pair = m.as_str();
+                    if pair.contains('-') {
+                        let idx = pair.find('-').unwrap();
+                        if idx == 0 {
+                            // Format: -N (last N bytes)
+                            ranges.push(Segment::RemainingSize(pair[1..].parse::<u64>().unwrap()));
+                        } else if idx == pair.len() - 1 {
+                            // Format: N- (from N to end)
+                            ranges
+                                .push(Segment::RemainingFrom(pair[..idx].parse::<u64>().unwrap()));
+                        } else {
+                            // Format: N-M (from N to M)
+                            let start = pair[..idx].parse::<u64>().unwrap();
+                            let end = pair[idx + 1..].parse::<u64>().unwrap();
+                            ranges.push(Segment::Regional(start, end));
+                        }
+                    }
+                }
+            }
+        }
+        Self {
+            unit,
+            segments: ranges,
+            combined: false,
+            filesize: None,
+        }
+    }
+
+    /// attach range to an existing file context
+    pub fn adjust(&mut self, filesize: u64) -> &mut Self {
+        self.filesize = Some(filesize);
+        self
+    }
+
+    /// sort range pairs, remove overlapped ones if exist
+    pub fn combine_segments(&mut self) {
+        if self.segments.is_empty() {
+            return;
+        }
+
+        let filesize = self
+            .filesize
+            .expect("filesize must be set before combining segments");
+
+        // Convert all segments to Regional type
+        let mut segments: Vec<Segment> = self
+            .segments
+            .iter()
+            .map(|seg| match seg {
+                Segment::RemainingSize(size) => Segment::Regional(filesize - size, filesize - 1),
+                Segment::RemainingFrom(start) => Segment::Regional(*start, filesize - 1),
+                Segment::Regional(start, end) => Segment::Regional(*start, *end),
+            })
+            .collect();
+
+        // Sort segments by start position
+        segments.sort_by(|a, b| {
+            if let (Segment::Regional(a_start, _), Segment::Regional(b_start, _)) = (a, b) {
+                a_start.cmp(b_start)
+            } else {
+                unreachable!("all segments should be Regional at this point")
+            }
+        });
+
+        let mut combined = Vec::new();
+        let mut current = if let Segment::Regional(start, end) = segments[0] {
+            (start, end)
+        } else {
+            unreachable!("all segments should be Regional at this point")
+        };
+
+        for segment in segments.iter().skip(1) {
+            if let Segment::Regional(start, end) = segment {
+                if current.1 + 1 >= *start {
+                    // Ranges overlap or are adjacent, merge them
+                    current.1 = current.1.max(*end);
+                } else {
+                    // No overlap, add current range and start a new one
+                    combined.push(Segment::Regional(current.0, current.1));
+                    current = (*start, *end);
+                }
+            }
+        }
+        combined.push(Segment::Regional(current.0, current.1));
+
+        self.segments = combined;
+        self.combined = true;
+    }
+
+    /// check if http body should be multipart byte-ranges form or normal form
+    fn multipart(&mut self) -> bool {
+        if !self.combined {
+            self.combine_segments();
+        }
+        self.segments.len() > 1
+    }
+
+    /// check if the range actually covers the full file.
+    fn integrality(&self) -> bool {
+        self.segments.is_empty()
+            || self.segments[0].eq(&Segment::Regional(0, self.filesize.unwrap() - 1))
+    }
+
+    fn is_valid(&self) -> bool {
+        !self.segments.is_empty()
+    }
+}
+
+impl AsyncRead for FileSegment {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let mut file = std::fs::File::open(self.file.as_path()).expect("read file error");
+        file.seek(SeekFrom::Start(self.offset)).unwrap();
+        let segment_size = min(self.size as usize, buf.remaining());
+        let mut read_buf = vec![0u8; segment_size];
+        file.read_exact(&mut read_buf).unwrap();
+        buf.put_slice(read_buf.as_slice());
+        let self_mut = self.get_mut();
+        self_mut.offset += segment_size as u64;
+        self_mut.size -= segment_size as u64;
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl MultipartByteRanges {
+    fn new(file: &Path, content_type: &str, range_values: &[Segment]) -> Self {
+        Self {
+            file: PathBuf::from(file),
+            content_type: String::from(content_type),
+            segments: range_values
+                .iter()
+                .map(|v| match v {
+                    Segment::Regional(from, to) => (*from, (*to - *from + 1)),
+                    Segment::RemainingFrom(_) | Segment::RemainingSize(_) => (0, 0),
+                })
+                .collect(),
+            pos: (0, 0, false),
+        }
+    }
+
+    fn segment_required_length(&self, part_headers: &[u8]) -> u64 {
+        let next_seg_len = self.segments[self.pos.0].1;
+        // +2 because part should add en extra '\r\n' after the bytes array load
+        if self.pos.1 == 0 {
+            part_headers.len() as u64 + next_seg_len + 2
+        } else {
+            next_seg_len + 2
+        }
+    }
+
+    fn fill_part_headers(&self, filesize: u64) -> Vec<u8> {
+        let segment = self.segments[self.pos.0];
+        let mut part_buf = String::new();
+        part_buf.push_str(format!("--{}\r\n", MULTIPART_BYTERANGES_MULTIPART_BOUNDARY).as_str());
+        part_buf.push_str(format!("Content-Type: {}\r\n", self.content_type).as_str());
+        part_buf.push_str(
+            format!(
+                "Content-Range: {} {}-{}/{}\r\n",
+                DEFAULT_RANGE_UNIT,
+                segment.0,
+                segment.0 + segment.1 - 1,
+                filesize
+            )
+            .as_str(),
+        );
+        part_buf.push_str(format!("Content-Length: {}\r\n", segment.1).as_str());
+        part_buf.push_str("\r\n");
+        part_buf.into_bytes()
+    }
+
+    #[allow(dead_code)]
+    fn get_segment_size(&self) -> Option<(u64, u64)> {
+        self.segments.get(self.pos.0).map(|segment| {
+            let remaining = segment.1 - self.pos.1;
+            if remaining > 0 {
+                (segment.0 + self.pos.1, remaining)
+            } else {
+                (0, 0)
+            }
+        })
+    }
+}
+
+impl AsyncRead for MultipartByteRanges {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if self.pos.0 >= self.segments.len() || self.pos.2 {
+            return Poll::Ready(Ok(()));
+        }
+        let mut file = std::fs::File::open(self.file.as_path()).expect("read file error");
+        let filesize = file.metadata().unwrap().len();
+
+        while self.pos.0 < self.segments.len() {
+            // 1. body_stream.append(MULTIPART_BYTERANGES_MULTIPART_BOUNDARY)
+            // 2. body_stream.append(content_type)
+            // 3. body_stream.append(content_range)
+            // 4. body_stream.append(bytes)
+            let segment = self.segments[self.pos.0];
+            let part_headers = self.fill_part_headers(filesize);
+
+            let capacity_needed = self.segment_required_length(&part_headers);
+            let available_size = min(capacity_needed, buf.remaining() as u64);
+
+            // first time read this segment
+            if self.pos.1 == 0 {
+                // remaining buffer size is not enough even for only non load content
+                if available_size < part_headers.len() as u64 {
+                    return Poll::Ready(Ok(()));
+                } else {
+                    buf.put_slice(part_headers.as_slice());
+                }
+            }
+            if buf.remaining() as u64 >= segment.1 - self.pos.1 + 2 {
+                let mut read_buf = vec![0u8; (segment.1 - self.pos.1) as usize];
+                file.seek(SeekFrom::Start(segment.0 + self.pos.1)).unwrap();
+                file.read_exact(&mut read_buf).unwrap();
+                buf.put_slice(read_buf.as_slice());
+                buf.put_slice(b"\r\n");
+
+                self.pos.0 += 1;
+                self.pos.1 = 0;
+            } else {
+                let mut read_buf = vec![0u8; buf.remaining()];
+                file.seek(SeekFrom::Start(segment.0 + self.pos.1)).unwrap();
+                file.read_exact(&mut read_buf)
+                    .expect("read file to buffer error");
+                buf.put_slice(read_buf.as_slice());
+
+                self.pos.1 += read_buf.len() as u64;
+                break;
+            }
+        }
+
+        // end of processing
+        let end_boundary = format!("--{}--\r\n", MULTIPART_BYTERANGES_MULTIPART_BOUNDARY);
+        if self.pos.0 == self.segments.len() && !self.pos.2 && buf.remaining() >= end_boundary.len()
+        {
+            buf.put_slice(end_boundary.as_bytes());
+            self.pos.2 = true;
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// get all local network interfaces and their IP addresses
+pub fn get_all_local_ips() -> Vec<String> {
+    let mut ips = HashSet::new();
+
+    for interface in netdev::get_interfaces() {
+        for ip in interface.ipv4_addrs() {
+            ips.insert(ip.to_string());
+        }
+    }
+
+    ips.into_iter().collect()
+}
+
+/// get file size bytes count. implementations should be different on different platforms.
+async fn get_size_bytes(file: &File) -> u64 {
+    file.metadata().await.unwrap().len()
+}
+
+/// make public accessible for testing
+pub fn breadcrumbs(parent: &Path, root: &Path) -> String {
+    let mut cur = parent;
+    let mut dirs: Vec<OsString> = vec![];
+    while cur.starts_with(root) && !root.starts_with(cur) {
+        dirs.push(cur.file_name().unwrap().to_os_string());
+        if let Some(p) = cur.parent() {
+            cur = p;
+        } else {
+            break;
+        }
+    }
+
+    let mut link = String::from("/");
+    let mut label = String::from("ROOT");
+    let mut items = String::new();
+    loop {
+        items += String::from(BREADCRUMBS_ITEM)
+            .replace("{{href}}", link.as_str())
+            .replace("{{label}}", label.as_str())
+            .as_str();
+        if dirs.is_empty() {
+            break;
+        }
+        let p = dirs.pop().unwrap();
+        label = p.to_str().unwrap().to_string();
+        link += label.as_str();
+        link += "/";
+    }
+    String::from(BREADCRUMBS_TEMPLATE).replace("{{items}}", items.as_str())
+}
+
+fn infallible(error: std::io::Error) -> Infallible {
+    panic!("io error: {}", error)
 }
 
 /// file service
@@ -416,532 +745,4 @@ fn log_request(request: &Request<Incoming>, time: u128, status_code: StatusCode)
         }
         _other => {}
     };
-}
-
-#[allow(dead_code)]
-impl Range {
-    fn new() -> Self {
-        Self {
-            unit: DEFAULT_RANGE_UNIT.to_string(),
-            segments: vec![],
-            combined: false,
-            filesize: None,
-        }
-    }
-
-    /// parse value from http header value.
-    fn from(val: &HeaderValue) -> Self {
-        let range = val.to_str().unwrap();
-        let mut unit: String = String::from(DEFAULT_RANGE_UNIT);
-        let mut ranges = vec![];
-        let regex = Regex::new(HEADER_RANGE_VALUE_REGEX).unwrap();
-        match regex.captures(range) {
-            None => {
-                warn!("not a valid HTTP Range header value: {}", range);
-            }
-            Some(caps) => {
-                unit = String::from(caps.get(1).unwrap().as_str());
-                let range_regex = Regex::new(RANGE_REGEX).unwrap();
-                for m in range_regex.find_iter(caps.get(2).unwrap().as_str()) {
-                    let pair = m.as_str();
-                    if pair.contains('-') {
-                        let idx = pair.find('-').unwrap();
-                        if idx == 0 {
-                            // Format: -N (last N bytes)
-                            ranges.push(Segment::RemainingSize(pair[1..].parse::<u64>().unwrap()));
-                        } else if idx == pair.len() - 1 {
-                            // Format: N- (from N to end)
-                            ranges
-                                .push(Segment::RemainingFrom(pair[..idx].parse::<u64>().unwrap()));
-                        } else {
-                            // Format: N-M (from N to M)
-                            let start = pair[..idx].parse::<u64>().unwrap();
-                            let end = pair[idx + 1..].parse::<u64>().unwrap();
-                            ranges.push(Segment::Regional(start, end));
-                        }
-                    }
-                }
-            }
-        }
-        Self {
-            unit,
-            segments: ranges,
-            combined: false,
-            filesize: None,
-        }
-    }
-
-    /// attach range to an existing file context
-    fn adjust(&mut self, filesize: u64) -> &mut Self {
-        self.filesize = Some(filesize);
-        self
-    }
-
-    /// sort range pairs, remove overlapped ones if exist
-    fn combine_segments(&mut self) {
-        if self.segments.is_empty() {
-            return;
-        }
-
-        let filesize = self
-            .filesize
-            .expect("filesize must be set before combining segments");
-
-        // Convert all segments to Regional type
-        let mut segments: Vec<Segment> = self
-            .segments
-            .iter()
-            .map(|seg| match seg {
-                Segment::RemainingSize(size) => Segment::Regional(filesize - size, filesize - 1),
-                Segment::RemainingFrom(start) => Segment::Regional(*start, filesize - 1),
-                Segment::Regional(start, end) => Segment::Regional(*start, *end),
-            })
-            .collect();
-
-        // Sort segments by start position
-        segments.sort_by(|a, b| {
-            if let (Segment::Regional(a_start, _), Segment::Regional(b_start, _)) = (a, b) {
-                a_start.cmp(b_start)
-            } else {
-                unreachable!("all segments should be Regional at this point")
-            }
-        });
-
-        let mut combined = Vec::new();
-        let mut current = if let Segment::Regional(start, end) = segments[0] {
-            (start, end)
-        } else {
-            unreachable!("all segments should be Regional at this point")
-        };
-
-        for segment in segments.iter().skip(1) {
-            if let Segment::Regional(start, end) = segment {
-                if current.1 + 1 >= *start {
-                    // Ranges overlap or are adjacent, merge them
-                    current.1 = current.1.max(*end);
-                } else {
-                    // No overlap, add current range and start a new one
-                    combined.push(Segment::Regional(current.0, current.1));
-                    current = (*start, *end);
-                }
-            }
-        }
-        combined.push(Segment::Regional(current.0, current.1));
-
-        self.segments = combined;
-        self.combined = true;
-    }
-
-    /// check if http body should be multipart byte-ranges form or normal form
-    fn multipart(&mut self) -> bool {
-        if !self.combined {
-            self.combine_segments();
-        }
-        self.segments.len() > 1
-    }
-
-    /// check if the range actually covers the full file.
-    fn integrality(&self) -> bool {
-        self.segments.is_empty()
-            || self.segments[0].eq(&Segment::Regional(0, self.filesize.unwrap() - 1))
-    }
-
-    fn is_valid(&self) -> bool {
-        !self.segments.is_empty()
-    }
-}
-
-impl AsyncRead for FileSegment {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        let mut file = std::fs::File::open(self.file.as_path()).expect("read file error");
-        file.seek(SeekFrom::Start(self.offset)).unwrap();
-        let segment_size = min(self.size as usize, buf.remaining());
-        let mut read_buf = vec![0u8; segment_size];
-        file.read_exact(&mut read_buf).unwrap();
-        buf.put_slice(read_buf.as_slice());
-        let self_mut = self.get_mut();
-        self_mut.offset += segment_size as u64;
-        self_mut.size -= segment_size as u64;
-        Poll::Ready(Ok(()))
-    }
-}
-
-impl MultipartByteRanges {
-    fn new(file: &Path, content_type: &str, range_values: &[Segment]) -> Self {
-        Self {
-            file: PathBuf::from(file),
-            content_type: String::from(content_type),
-            segments: range_values
-                .iter()
-                .map(|v| match v {
-                    Segment::Regional(from, to) => (*from, (*to - *from + 1)),
-                    Segment::RemainingFrom(_) | Segment::RemainingSize(_) => (0, 0),
-                })
-                .collect(),
-            pos: (0, 0, false),
-        }
-    }
-
-    fn segment_required_length(&self, part_headers: &[u8]) -> u64 {
-        let next_seg_len = self.segments[self.pos.0].1;
-        // +2 because part should add en extra '\r\n' after the bytes array load
-        if self.pos.1 == 0 {
-            part_headers.len() as u64 + next_seg_len + 2
-        } else {
-            next_seg_len + 2
-        }
-    }
-
-    fn fill_part_headers(&self, filesize: u64) -> Vec<u8> {
-        let segment = self.segments[self.pos.0];
-        let mut part_buf = String::new();
-        part_buf.push_str(format!("--{}\r\n", MULTIPART_BYTERANGES_MULTIPART_BOUNDARY).as_str());
-        part_buf.push_str(format!("Content-Type: {}\r\n", self.content_type).as_str());
-        part_buf.push_str(
-            format!(
-                "Content-Range: {} {}-{}/{}\r\n",
-                DEFAULT_RANGE_UNIT,
-                segment.0,
-                segment.0 + segment.1 - 1,
-                filesize
-            )
-            .as_str(),
-        );
-        part_buf.push_str(format!("Content-Length: {}\r\n", segment.1).as_str());
-        part_buf.push_str("\r\n");
-        part_buf.into_bytes()
-    }
-
-    #[allow(dead_code)]
-    fn get_segment_size(&self) -> Option<(u64, u64)> {
-        self.segments.get(self.pos.0).map(|segment| {
-            let remaining = segment.1 - self.pos.1;
-            if remaining > 0 {
-                (segment.0 + self.pos.1, remaining)
-            } else {
-                (0, 0)
-            }
-        })
-    }
-}
-
-impl AsyncRead for MultipartByteRanges {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        if self.pos.0 >= self.segments.len() || self.pos.2 {
-            return Poll::Ready(Ok(()));
-        }
-        let mut file = std::fs::File::open(self.file.as_path()).expect("read file error");
-        let filesize = file.metadata().unwrap().len();
-
-        while self.pos.0 < self.segments.len() {
-            // 1. body_stream.append(MULTIPART_BYTERANGES_MULTIPART_BOUNDARY)
-            // 2. body_stream.append(content_type)
-            // 3. body_stream.append(content_range)
-            // 4. body_stream.append(bytes)
-            let segment = self.segments[self.pos.0];
-            let part_headers = self.fill_part_headers(filesize);
-
-            let capacity_needed = self.segment_required_length(&part_headers);
-            let available_size = min(capacity_needed, buf.remaining() as u64);
-
-            // first time read this segment
-            if self.pos.1 == 0 {
-                // remaining buffer size is not enough even for only non load content
-                if available_size < part_headers.len() as u64 {
-                    return Poll::Ready(Ok(()));
-                } else {
-                    buf.put_slice(part_headers.as_slice());
-                }
-            }
-            if buf.remaining() as u64 >= segment.1 - self.pos.1 + 2 {
-                let mut read_buf = vec![0u8; (segment.1 - self.pos.1) as usize];
-                file.seek(SeekFrom::Start(segment.0 + self.pos.1)).unwrap();
-                file.read_exact(&mut read_buf).unwrap();
-                buf.put_slice(read_buf.as_slice());
-                buf.put_slice(b"\r\n");
-
-                self.pos.0 += 1;
-                self.pos.1 = 0;
-            } else {
-                let mut read_buf = vec![0u8; buf.remaining()];
-                file.seek(SeekFrom::Start(segment.0 + self.pos.1)).unwrap();
-                file.read_exact(&mut read_buf)
-                    .expect("read file to buffer error");
-                buf.put_slice(read_buf.as_slice());
-
-                self.pos.1 += read_buf.len() as u64;
-                break;
-            }
-        }
-
-        // end of processing
-        let end_boundary = format!("--{}--\r\n", MULTIPART_BYTERANGES_MULTIPART_BOUNDARY);
-        if self.pos.0 == self.segments.len() && !self.pos.2 && buf.remaining() >= end_boundary.len()
-        {
-            buf.put_slice(end_boundary.as_bytes());
-            self.pos.2 = true;
-        }
-        Poll::Ready(Ok(()))
-    }
-}
-
-/// get all local network interfaces and their IP addresses
-pub(crate) fn get_all_local_ips() -> Vec<String> {
-    let mut ips = HashSet::new();
-
-    for interface in netdev::get_interfaces() {
-        for ip in interface.ipv4_addrs() {
-            ips.insert(ip.to_string());
-        }
-    }
-    
-    ips.into_iter().collect()
-}
-
-/// get file size bytes count. implementations should be different on different platforms.
-async fn get_size_bytes(file: &File) -> u64 {
-    file.metadata().await.unwrap().len()
-}
-
-fn breadcrumbs(parent: &Path, root: &Path) -> String {
-    let mut cur = parent;
-    let mut dirs: Vec<OsString> = vec![];
-    while cur.starts_with(root) && !root.starts_with(cur) {
-        dirs.push(cur.file_name().unwrap().to_os_string());
-        if let Some(p) = cur.parent() {
-            cur = p;
-        } else {
-            break;
-        }
-    }
-
-    let mut link = String::from("/");
-    let mut label = String::from("ROOT");
-    let mut items = String::new();
-    loop {
-        items += String::from(BREADCRUMBS_ITEM)
-            .replace("{{href}}", link.as_str())
-            .replace("{{label}}", label.as_str())
-            .as_str();
-        if dirs.is_empty() {
-            break;
-        }
-        let p = dirs.pop().unwrap();
-        label = p.to_str().unwrap().to_string();
-        link += label.as_str();
-        link += "/";
-    }
-    String::from(BREADCRUMBS_TEMPLATE).replace("{{items}}", items.as_str())
-}
-
-fn infallible(error: std::io::Error) -> Infallible {
-    panic!("io error: {}", error)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const TEST_FILE_SIZE: u64 = 2560000;
-
-    #[test]
-    fn should_get_local_ips() {
-        let ips = get_all_local_ips();
-        assert!(!ips.is_empty());
-    }
-
-    #[test]
-    fn should_generate_breadcrumbs_header() {
-        let root = PathBuf::from("/test/1/2");
-        let parent = PathBuf::from("/test/1/2/3/4/5/6/7");
-        let links: Vec<(&str, &str)> = vec![
-            ("/", "ROOT"),
-            ("/3/", "3"),
-            ("/3/4/", "4"),
-            ("/3/4/5/", "5"),
-            ("/3/4/5/6/", "6"),
-            ("/3/4/5/6/7/", "7"),
-        ];
-        let actual = breadcrumbs(parent.as_path(), root.as_path());
-        let mut items = String::new();
-        for (link, label) in links {
-            items += String::from(BREADCRUMBS_ITEM)
-                .replace("{{href}}", link)
-                .replace("{{label}}", label)
-                .as_str();
-        }
-        let expected = String::from(BREADCRUMBS_TEMPLATE).replace("{{items}}", items.as_str());
-
-        // remove all spaces to compare
-        let regex = Regex::new(r"[\s]").unwrap();
-        assert_eq!(
-            regex.replace_all(actual.as_str(), ""),
-            regex.replace_all(expected.as_str(), "")
-        );
-    }
-
-    #[test]
-    fn should_match_range_header() {
-        let regex = Regex::new(HEADER_RANGE_VALUE_REGEX).unwrap();
-
-        let range_value1 = "bytes=1024-65335";
-        assert!(
-            regex.captures(range_value1).is_some(),
-            "regex should range value1"
-        );
-
-        let range_value2 = "bytes=-65335, 102400-";
-        assert!(
-            regex.captures(range_value2).is_some(),
-            "regex should range value2"
-        );
-
-        let range_value3 = "bytes=-65335,102400-";
-        assert!(
-            regex.captures(range_value3).is_some(),
-            "regex should range value3"
-        );
-
-        let range_value4 = "bytes=-612233";
-        assert!(
-            regex.captures(range_value4).is_some(),
-            "regex should range value4"
-        );
-
-        let range_value5 = "bytes=1024-2048, 3072-4096, 6172-102400";
-        assert!(
-            regex.captures(range_value5).is_some(),
-            "regex should range value5"
-        );
-    }
-
-    #[test]
-    fn should_parse_range0() {
-        let range_header = HeaderValue::from_static("bytes=1024-65535");
-        let expected_ranges = [Segment::Regional(1024, 65535)];
-        let actual = Range::from(&range_header);
-        assert_eq!(actual.unit, String::from("bytes"));
-        assert_eq!(actual.segments[0], expected_ranges[0]);
-    }
-
-    #[test]
-    fn should_parse_range1() {
-        let range_header = HeaderValue::from_static("bytes=-1024, 23345-");
-        let expected_ranges = [Segment::RemainingSize(1024), Segment::RemainingFrom(23345)];
-        let actual = Range::from(&range_header);
-        assert_eq!(actual.unit, String::from("bytes"));
-        assert_eq!(actual.segments, expected_ranges);
-    }
-
-    #[test]
-    fn should_parse_range2() {
-        let range_header = HeaderValue::from_static("bytes=1-12, 102400-, 12-24,24-96,96-1024");
-        let expected_ranges = [
-            Segment::Regional(1, 12),
-            Segment::RemainingFrom(102400),
-            Segment::Regional(12, 24),
-            Segment::Regional(24, 96),
-            Segment::Regional(96, 1024),
-        ];
-        let actual = Range::from(&range_header);
-        assert_eq!(actual.unit, String::from("bytes"));
-        assert_eq!(actual.segments, expected_ranges);
-    }
-
-    #[test]
-    fn should_ranges_combined0() {
-        let mut range = Range::new();
-        range.segments = vec![
-            Segment::Regional(10, 36),
-            Segment::Regional(72, 144),
-            Segment::Regional(8, 512),
-            Segment::RemainingSize(96),
-            Segment::RemainingFrom(1024),
-        ];
-        let mut expected = Range::new();
-        expected.combined = true;
-        expected.filesize = Some(TEST_FILE_SIZE);
-        expected.segments = vec![
-            Segment::Regional(8, 512),
-            Segment::Regional(1024, TEST_FILE_SIZE - 1),
-        ];
-
-        range.adjust(TEST_FILE_SIZE).combine_segments();
-
-        assert_eq!(
-            range, expected,
-            "ranges should be combined and not overlapping"
-        );
-    }
-
-    #[test]
-    fn should_ranges_combined1() {
-        let mut range = Range::new();
-        range.segments = vec![Segment::RemainingSize(1024), Segment::RemainingFrom(512)];
-        let mut expected = Range::new();
-        expected.combined = true;
-        expected.filesize = Some(TEST_FILE_SIZE);
-        expected.segments = vec![Segment::Regional(512, TEST_FILE_SIZE - 1)];
-
-        range.adjust(TEST_FILE_SIZE).combine_segments();
-
-        assert_eq!(
-            range, expected,
-            "ranges should be combined and not overlapping"
-        );
-    }
-
-    #[test]
-    fn should_ranges_not_combined() {
-        let mut range = Range::new();
-        range.segments = vec![
-            Segment::Regional(512, 1024),
-            Segment::RemainingFrom(10240),
-            Segment::RemainingSize(256),
-            Segment::Regional(2048, 5120),
-            Segment::Regional(6172, 8192),
-        ];
-        let mut expected = Range::new();
-        expected.combined = true;
-        expected.filesize = Some(TEST_FILE_SIZE);
-        expected.segments = vec![
-            Segment::Regional(512, 1024),
-            Segment::Regional(2048, 5120),
-            Segment::Regional(6172, 8192),
-            Segment::Regional(10240, TEST_FILE_SIZE - 1),
-        ];
-
-        range.adjust(TEST_FILE_SIZE).combine_segments();
-
-        assert_eq!(
-            range, expected,
-            "ranges should be combined and not overlapping"
-        );
-    }
-
-    #[tokio::test]
-    async fn bytes_stream_async_read() {
-        // let text = "this is line 1\nthis is line 2\nthis is line 3";
-        // let mut stream = BytesStream(text.as_bytes().to_vec());
-        //
-        // let mut buf = Vec::new();
-        // let actual = stream.read_to_end(&mut buf).await;
-        // assert!(actual.is_ok());
-        // assert_eq!(actual.unwrap(), text.len());
-    }
-
-    #[test]
-    fn test_parse_range_values() {
-        let expected_ranges = [Segment::Regional(1024, 65535)];
-        let actual = Range::from(&HeaderValue::from_static("bytes=1024-65535")).segments;
-        assert_eq!(actual, expected_ranges);
-    }
 }
