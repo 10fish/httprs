@@ -1,6 +1,6 @@
 use super::{
     conf::Configuration,
-    http::{file_service, local_address},
+    http::file_service,
     VERSION_STRING,
 };
 use colored::Colorize;
@@ -8,10 +8,7 @@ use hyper::{server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
 use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
 use std::{
-    error::Error,
-    io::{Error as IoError, ErrorKind},
-    sync::atomic::{AtomicBool, Ordering},
-    sync::Arc,
+    error::Error, io::{Error as IoError, ErrorKind}, sync::{atomic::{AtomicBool, Ordering}, Arc}
 };
 use tokio::{net::TcpListener, signal::ctrl_c, sync::RwLock};
 use tokio_rustls::TlsAcceptor;
@@ -207,14 +204,22 @@ impl Server {
             )
             .green()
         );
+        
+        info!("Service available on:");
         if host == "0.0.0.0" {
-            if let Some(ip) = local_address() {
+            // Display all available local IP addresses
+            let local_ips = super::http::get_all_local_ips();
+            for ip in local_ips {
                 info!(
-                    "Local Network {} on: {}",
-                    protocol_colored,
+                    "  -> {}",
                     format!("{}://{}:{}", protocol, ip, port).green()
                 );
             }
+        } else {
+            info!(
+                "  -> {}",
+                format!("{}://{}:{}", protocol, host, port).green()
+            );
         }
     }
 }

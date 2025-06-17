@@ -96,10 +96,10 @@ cargo install httprs
 
 ### Usage
 ```shell
-# quick start, running on http://127.0.0.1:9900
+# quick start, running on all network interfaces (0.0.0.0:9900)
 httprs
-# run in insecure mode
-httprs -H 0.0.0.0 -P 10000
+# run on specific local IP address
+httprs -H 192.168.10.1
 # run in secure mode
 httprs --secure --key /path/to/keyfile --cert /path/to/certfile
 # run with graceful shutdown
@@ -107,6 +107,8 @@ httprs --graceful-shutdown
 # help for more details
 httprs --help
 ```
+
+> Note: By default, the server binds to `0.0.0.0` which means it will listen on all available network interfaces. This makes the server accessible from other devices on the network. If you want to restrict access to localhost only, use `-H 127.0.0.1`.
 
 ### Roadmap
 

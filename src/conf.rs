@@ -39,7 +39,7 @@ pub enum Compression {
 }
 
 #[derive(Debug, Clone, Parser, Deserialize)]
-#[command(name = "httprs", author = "10fish", version = "0.2.4")]
+#[command(name = "httprs", author = "10fish", version = "0.2.5")]
 #[command(version, about, long_about = None, after_long_help = "./after-help.md")]
 pub struct Configuration {
     /// Path of configuration file.
@@ -47,7 +47,7 @@ pub struct Configuration {
     pub config: Option<OsString>,
 
     /// Binding IP address of server.
-    #[arg(short = 'H', long, default_value = "127.0.0.1")]
+    #[arg(short = 'H', long, default_value = "0.0.0.0")]
     pub host: Option<String>,
 
     /// Binding port of service.
@@ -198,7 +198,7 @@ mod test {
     use std::str::FromStr;
 
     /// default binding host.
-    const DEFAULT_HOST: &str = "127.0.0.1";
+    const DEFAULT_HOST: &str = "0.0.0.0";
 
     /// default binding port.
     const DEFAULT_PORT: u16 = 9900;

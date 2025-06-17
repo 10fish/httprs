@@ -9,6 +9,7 @@ use hyper::{Request, Response, StatusCode};
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::cmp::min;
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -692,22 +693,17 @@ impl AsyncRead for MultipartByteRanges {
     }
 }
 
-/// get the binding in the local network context
-pub(crate) fn local_address() -> Option<String> {
-    let socket = match std::net::UdpSocket::bind("0.0.0.0:0") {
-        Ok(s) => s,
-        Err(_) => return None,
-    };
+/// get all local network interfaces and their IP addresses
+pub(crate) fn get_all_local_ips() -> Vec<String> {
+    let mut ips = HashSet::new();
 
-    match socket.connect("8.8.8.8:80") {
-        Ok(()) => (),
-        Err(_) => return None,
-    };
-
-    match socket.local_addr() {
-        Ok(addr) => Some(addr.ip().to_string()),
-        Err(_) => None,
+    for interface in netdev::get_interfaces() {
+        for ip in interface.ipv4_addrs() {
+            ips.insert(ip.to_string());
+        }
     }
+    
+    ips.into_iter().collect()
 }
 
 /// get file size bytes count. implementations should be different on different platforms.
@@ -757,9 +753,9 @@ mod tests {
     const TEST_FILE_SIZE: u64 = 2560000;
 
     #[test]
-    fn should_get_local_address() {
-        let option = local_address();
-        println!("{:?}", option);
+    fn should_get_local_ips() {
+        let ips = get_all_local_ips();
+        assert!(!ips.is_empty());
     }
 
     #[test]

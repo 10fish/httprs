@@ -1,7 +1,7 @@
 [package]
 name = "httprs"
 description = "A fast simple command line http server tool"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 authors = ["10fish <jokefish@live.com>"]
 license-file = "LICENSE"
@@ -39,6 +39,7 @@ log = "0.4"
 
 rustls = "0.23"
 tokio-rustls = "0.26"
+netdev = "0.35"
 
 [[bin]]
 name = "httprs"
