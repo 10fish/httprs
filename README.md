@@ -24,67 +24,41 @@ the main features are as followings, and certainly more will be added:
 - colored logs
 - partial content support
 
-### HTTP Server Standards & Benchmarks
+### HTTP and library support
 
-#### Implemented Features
+`httprs` serves files and directory listings over HTTP/1.1, with optional TLS.
+It supports `GET`, `HEAD`, `OPTIONS`, full file streaming, and single or multipart
+byte ranges for files of any size. Unsatisfiable ranges return `416` with the
+representation size. File responses expose `Last-Modified` and support date
+preconditions. The server uses the full representation for `If-Range` requests
+because it has no strong validators.
 
-1. HTTP/1.1 Standard Support:
-- ✅ Basic HTTP/1.1 protocol support
-- ✅ Standard HTTP methods
-- ✅ Standard HTTP headers
-- ✅ Status codes
+The CLI also accepts a TOML configuration file through `--config`. Explicit
+command-line arguments take precedence over TOML values, followed by defaults.
 
-2. Performance Features:
-- ✅ Asynchronous I/O (using tokio)
-- ✅ Chunked file transfer (Range request support)
-- ✅ Static file serving
-- ✅ Directory listing
-- ✅ Graceful shutdown
+Use `StaticFiles` to integrate file serving into an existing HTTP service.
+Initialize it once and share it across requests.
 
-3. Security Features:
-- ✅ HTTPS support (TLS/SSL)
-- ✅ Basic error handling
-- ✅ Request logging
+```rust
+use httprs::{StaticBody, StaticFiles};
+use hyper::{Request, Response};
 
-4. Functional Features:
-- ✅ MIME type support
-- ✅ File system navigation
-- ✅ Breadcrumb navigation
-- ✅ Response time tracking
+async fn serve_static(files: &StaticFiles, request: Request<()>) -> Response<StaticBody> {
+    files.handle(request).await
+}
 
-#### Planned Features
+// Initialize once with StaticFiles::new(".").await? and pass it to the handler.
+```
 
-1. HTTP Standards:
-- ⏳ HTTP/2 support
-- ⏳ HTTP/3 support
-- ⏳ WebSocket support
-- ⏳ Compression support (gzip, deflate)
+Use `Server::try_new` and `Server::serve` to run a standalone instance on a
+caller-provided listener with a caller-provided shutdown signal. The CLI
+installs its logging subscriber. Embedded applications configure their own
+logging.
 
-2. Performance Optimizations:
-- ⏳ Connection pool management
-- ⏳ Cache control
-- ⏳ Compression transmission
-- ⏳ Load balancing
-- ⏳ Request rate limiting
-
-3. Security Enhancements:
-- ⏳ CORS support
-- ⏳ Security headers (HSTS, etc.)
-- ⏳ Request validation
-- ⏳ Access control
-
-4. Advanced Features:
-- ⏳ Dynamic content generation
-- ⏳ Session management
-- ⏳ Authentication & Authorization
-- ⏳ API support
-- ⏳ Reverse proxy
-
-5. Monitoring & Management:
-- ⏳ Performance metrics collection
-- ⏳ Health checks
-- ⏳ Management interface
-- ⏳ Hot reload configuration
+The integration tests cover response status, headers, and body for regular,
+partial, and conditional requests. The HTTP/1.1 connection test runs over an
+in-memory duplex connection and checks pipelined responses and graceful
+shutdown. Run them with `cargo test --all-targets`.
 
 ### Installation
 Download pre-built binaries from [release](https://github.com/10fish/httprs/releases) page.
@@ -130,14 +104,10 @@ httprs --help
     - [x] Linux
     - [x] Windows
 - [x] HTTPS/TLS Transmission Encryption
-- [ ] Partial Request/Response Support
-    - [ ] `If-Range` REQUEST Header
-    - [ ] `If-Match` REQUEST Header
-    - [x] `Range` REQUEST Header: when file size exceeds 50MB
-    - [x] `Accept-Ranges` RESPONSE Header
-    - [x] `Content-Range` RESPONSE Header
-    - [x] CODE `206` - Partial Content
-    - [ ] CODE `416` - Range Not Satisfiable
+- [ ] Strong validators for conditional requests and range resumption
+    - [x] Date preconditions with `Last-Modified`
+    - [x] Single and multipart byte ranges with `206` and `416`
+    - [ ] Entity tags and matching `If-Range` requests
 - [ ] CORS Support
 - [ ] Transmission Compression
 - [ ] Authentication

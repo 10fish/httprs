@@ -1,411 +1,24 @@
 use bytes::Bytes;
-use chrono::{DateTime, Local};
-use colored::Colorize;
 use futures_util::TryStreamExt;
-use http_body_util::{BodyExt, StreamBody, combinators::BoxBody};
-use hyper::body::{Frame, Incoming};
-use hyper::header::{self, HeaderValue, RANGE};
-use hyper::{Request, Response, StatusCode};
-use lazy_static::lazy_static;
-use regex::Regex;
-use std::cmp::min;
+use http_body_util::{BodyExt, Full, StreamBody, combinators::UnsyncBoxBody};
+use hyper::body::Frame;
+use hyper::header::{self, HeaderMap, HeaderName, HeaderValue};
+use hyper::{Method, Request, Response, StatusCode};
 use std::collections::HashSet;
-use std::convert::Infallible;
-use std::env;
-use std::ffi::{OsStr, OsString};
-use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use std::time::SystemTime;
-use tokio::fs::File;
-use tokio::io::{AsyncRead, ReadBuf};
+use std::ffi::OsStr;
+use std::io::{self, SeekFrom};
+use std::path::{Component, Path, PathBuf};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use tokio::fs::{self, File};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
-use tracing::{Level, debug, trace, warn};
-use urlencoding::decode;
-use walkdir::WalkDir;
+use tracing::debug;
 
-use crate::{DEFAULT_MIME_TYPE, MIME_TYPES, VERSION_STRING};
-
-const HTML_TEMPLATE: &str = include_str!("../static/index.html");
-
-const FILE_LIST_TABLE_TEMPLATE: &str = r###"
-<table style="margin-left: 1em">
-    <thead style="font-style: italic;">
-        <tr>
-            <th style="padding-right: 1em;">File Name</th>
-            <th style="padding-right: 1em;">Size</th>
-            <th style="padding-right: 1em;">Last Modified</th>
-        </tr>
-    </thead>
-    <tbody>
-        {{file_list}}{{placeholder}}
-    </tbody>
-</table>
-"###;
-
-const EMPTY_LIST: &str = "<tr><td><i>&lt;empty&gt;</i><td></tr>";
-
-const FILE_LIST_TABLE_ROW: &str = r###"
-<tr>
-    <td style="padding-right: 1em;"><a href="{{href}}">{{name}}</a></td>
-    <td style="padding-right: 1em;">{{size}}</td>
-    <td style="padding-right: 1em;">{{modified}}</td>
-</tr>
-"###;
-
-pub const BREADCRUMBS_TEMPLATE: &str = r###"
-<ul id="breadcrumbs" style="display: flex;list-style: none;align-items: center;padding-inline: unset;margin-left: 1em;">
-    {{items}}
-</ul>
-"###;
-
-pub const BREADCRUMBS_ITEM: &str = r###"
-<li class="breadcrums-item">
-    <a href="{{href}}">
-        <span class="separator" style="padding: 0 5px 0 5px;">/</span>
-        <span>{{label}}</span>
-    </a>
-</li>
-"###;
-
-/// response with partial content when body size larger than 50MB
-const RESPONSE_BODY_SIZE_LIMIT_IN_BYTES: u64 = 50 * 1024 * 1024;
-
-/// HTTP request header `RANGE` value regex. usually it can be one of following forms:
-/// ```text
-/// Range: <unit>=<range-start>-
-/// Range: <unit>=<range-start>-<range-end>
-/// Range: <unit>=<range-start>-<range-end>, <range-start>-<range-end>
-/// Range: <unit>=<range-start>-<range-end>, <range-start>-<range-end>, <range-start>-<range-end>
-/// Range: <unit>=-<suffix-length>
-/// ```
-pub const HEADER_RANGE_VALUE_REGEX: &str = r"^(bytes)=(.+)$";
-
-const RANGE_REGEX: &str = r"(\d+-\d*|-\d+|\d+-\d+)";
-
-const DEFAULT_RANGE_UNIT: &str = "bytes";
-const DEFAULT_REQUEST_RANGE_VALUE: &str = "bytes=0-";
-const MULTIPART_BYTERANGES_MULTIPART_BOUNDARY: &str = "THIS_SEPARATES";
-
-lazy_static! {
-    static ref HEADER_SERVER_VALUE: HeaderValue = HeaderValue::from_static(VERSION_STRING.as_str());
-    static ref MULTIPART_BYTERANGES_HEADER_VALUE: HeaderValue = HeaderValue::from_str(
-        format!(
-            "multipart/byteranges; boundary={}",
-            MULTIPART_BYTERANGES_MULTIPART_BOUNDARY
-        )
-        .as_str(),
-    )
-    .unwrap();
-}
-
-/// consists of a range with a start or an end(if not, it means to the start or end of the target file).
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub enum Segment {
-    RemainingFrom(u64),
-    Regional(u64, u64),
-    RemainingSize(u64),
-}
-
-/// represents the HTTP Request Header value of `header::RANGE`.
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub struct Range {
-    pub unit: String,
-    pub segments: Vec<Segment>,
-    pub combined: bool,
-    pub filesize: Option<u64>,
-}
-
-#[derive(Debug)]
-struct FileSegment {
-    file: PathBuf,
-    offset: u64,
-    size: u64,
-}
-
-#[derive(Debug)]
-pub struct MultipartByteRanges {
-    file: PathBuf,
-    content_type: String,
-    segments: Vec<(u64, u64)>,
-    pos: (usize, u64, bool),
-}
-
-#[allow(dead_code)]
-impl Range {
-    pub fn new() -> Self {
-        Self {
-            unit: DEFAULT_RANGE_UNIT.to_string(),
-            segments: vec![],
-            combined: false,
-            filesize: None,
-        }
-    }
-
-    /// parse value from http header value.
-    pub fn from(val: &HeaderValue) -> Self {
-        let range = val.to_str().unwrap();
-        let mut unit: String = String::from(DEFAULT_RANGE_UNIT);
-        let mut ranges = vec![];
-        let regex = Regex::new(HEADER_RANGE_VALUE_REGEX).unwrap();
-        match regex.captures(range) {
-            None => {
-                warn!("not a valid HTTP Range header value: {}", range);
-            }
-            Some(caps) => {
-                unit = String::from(caps.get(1).unwrap().as_str());
-                let range_regex = Regex::new(RANGE_REGEX).unwrap();
-                for m in range_regex.find_iter(caps.get(2).unwrap().as_str()) {
-                    let pair = m.as_str();
-                    if pair.contains('-') {
-                        let idx = pair.find('-').unwrap();
-                        if idx == 0 {
-                            // Format: -N (last N bytes)
-                            ranges.push(Segment::RemainingSize(pair[1..].parse::<u64>().unwrap()));
-                        } else if idx == pair.len() - 1 {
-                            // Format: N- (from N to end)
-                            ranges
-                                .push(Segment::RemainingFrom(pair[..idx].parse::<u64>().unwrap()));
-                        } else {
-                            // Format: N-M (from N to M)
-                            let start = pair[..idx].parse::<u64>().unwrap();
-                            let end = pair[idx + 1..].parse::<u64>().unwrap();
-                            ranges.push(Segment::Regional(start, end));
-                        }
-                    }
-                }
-            }
-        }
-        Self {
-            unit,
-            segments: ranges,
-            combined: false,
-            filesize: None,
-        }
-    }
-
-    /// attach range to an existing file context
-    pub fn adjust(&mut self, filesize: u64) -> &mut Self {
-        self.filesize = Some(filesize);
-        self
-    }
-
-    /// sort range pairs, remove overlapped ones if exist
-    pub fn combine_segments(&mut self) {
-        if self.segments.is_empty() {
-            return;
-        }
-
-        let filesize = self
-            .filesize
-            .expect("filesize must be set before combining segments");
-
-        // Convert all segments to Regional type
-        let mut segments: Vec<Segment> = self
-            .segments
-            .iter()
-            .map(|seg| match seg {
-                Segment::RemainingSize(size) => Segment::Regional(filesize - size, filesize - 1),
-                Segment::RemainingFrom(start) => Segment::Regional(*start, filesize - 1),
-                Segment::Regional(start, end) => Segment::Regional(*start, *end),
-            })
-            .collect();
-
-        // Sort segments by start position
-        segments.sort_by(|a, b| {
-            if let (Segment::Regional(a_start, _), Segment::Regional(b_start, _)) = (a, b) {
-                a_start.cmp(b_start)
-            } else {
-                unreachable!("all segments should be Regional at this point")
-            }
-        });
-
-        let mut combined = Vec::new();
-        let mut current = if let Segment::Regional(start, end) = segments[0] {
-            (start, end)
-        } else {
-            unreachable!("all segments should be Regional at this point")
-        };
-
-        for segment in segments.iter().skip(1) {
-            if let Segment::Regional(start, end) = segment {
-                if current.1 + 1 >= *start {
-                    // Ranges overlap or are adjacent, merge them
-                    current.1 = current.1.max(*end);
-                } else {
-                    // No overlap, add current range and start a new one
-                    combined.push(Segment::Regional(current.0, current.1));
-                    current = (*start, *end);
-                }
-            }
-        }
-        combined.push(Segment::Regional(current.0, current.1));
-
-        self.segments = combined;
-        self.combined = true;
-    }
-
-    /// check if http body should be multipart byte-ranges form or normal form
-    fn multipart(&mut self) -> bool {
-        if !self.combined {
-            self.combine_segments();
-        }
-        self.segments.len() > 1
-    }
-
-    /// check if the range actually covers the full file.
-    fn integrality(&self) -> bool {
-        self.segments.is_empty()
-            || self.segments[0].eq(&Segment::Regional(0, self.filesize.unwrap() - 1))
-    }
-
-    fn is_valid(&self) -> bool {
-        !self.segments.is_empty()
-    }
-}
-
-impl AsyncRead for FileSegment {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        let mut file = std::fs::File::open(self.file.as_path()).expect("read file error");
-        file.seek(SeekFrom::Start(self.offset)).unwrap();
-        let segment_size = min(self.size as usize, buf.remaining());
-        let mut read_buf = vec![0u8; segment_size];
-        file.read_exact(&mut read_buf).unwrap();
-        buf.put_slice(read_buf.as_slice());
-        let self_mut = self.get_mut();
-        self_mut.offset += segment_size as u64;
-        self_mut.size -= segment_size as u64;
-        Poll::Ready(Ok(()))
-    }
-}
-
-impl MultipartByteRanges {
-    fn new(file: &Path, content_type: &str, range_values: &[Segment]) -> Self {
-        Self {
-            file: PathBuf::from(file),
-            content_type: String::from(content_type),
-            segments: range_values
-                .iter()
-                .map(|v| match v {
-                    Segment::Regional(from, to) => (*from, (*to - *from + 1)),
-                    Segment::RemainingFrom(_) | Segment::RemainingSize(_) => (0, 0),
-                })
-                .collect(),
-            pos: (0, 0, false),
-        }
-    }
-
-    fn segment_required_length(&self, part_headers: &[u8]) -> u64 {
-        let next_seg_len = self.segments[self.pos.0].1;
-        // +2 because part should add en extra '\r\n' after the bytes array load
-        if self.pos.1 == 0 {
-            part_headers.len() as u64 + next_seg_len + 2
-        } else {
-            next_seg_len + 2
-        }
-    }
-
-    fn fill_part_headers(&self, filesize: u64) -> Vec<u8> {
-        let segment = self.segments[self.pos.0];
-        let mut part_buf = String::new();
-        part_buf.push_str(format!("--{}\r\n", MULTIPART_BYTERANGES_MULTIPART_BOUNDARY).as_str());
-        part_buf.push_str(format!("Content-Type: {}\r\n", self.content_type).as_str());
-        part_buf.push_str(
-            format!(
-                "Content-Range: {} {}-{}/{}\r\n",
-                DEFAULT_RANGE_UNIT,
-                segment.0,
-                segment.0 + segment.1 - 1,
-                filesize
-            )
-            .as_str(),
-        );
-        part_buf.push_str(format!("Content-Length: {}\r\n", segment.1).as_str());
-        part_buf.push_str("\r\n");
-        part_buf.into_bytes()
-    }
-
-    #[allow(dead_code)]
-    fn get_segment_size(&self) -> Option<(u64, u64)> {
-        self.segments.get(self.pos.0).map(|segment| {
-            let remaining = segment.1 - self.pos.1;
-            if remaining > 0 {
-                (segment.0 + self.pos.1, remaining)
-            } else {
-                (0, 0)
-            }
-        })
-    }
-}
-
-impl AsyncRead for MultipartByteRanges {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        if self.pos.0 >= self.segments.len() || self.pos.2 {
-            return Poll::Ready(Ok(()));
-        }
-        let mut file = std::fs::File::open(self.file.as_path()).expect("read file error");
-        let filesize = file.metadata().unwrap().len();
-
-        while self.pos.0 < self.segments.len() {
-            // 1. body_stream.append(MULTIPART_BYTERANGES_MULTIPART_BOUNDARY)
-            // 2. body_stream.append(content_type)
-            // 3. body_stream.append(content_range)
-            // 4. body_stream.append(bytes)
-            let segment = self.segments[self.pos.0];
-            let part_headers = self.fill_part_headers(filesize);
-
-            let capacity_needed = self.segment_required_length(&part_headers);
-            let available_size = min(capacity_needed, buf.remaining() as u64);
-
-            // first time read this segment
-            if self.pos.1 == 0 {
-                // remaining buffer size is not enough even for only non load content
-                if available_size < part_headers.len() as u64 {
-                    return Poll::Ready(Ok(()));
-                } else {
-                    buf.put_slice(part_headers.as_slice());
-                }
-            }
-            if buf.remaining() as u64 >= segment.1 - self.pos.1 + 2 {
-                let mut read_buf = vec![0u8; (segment.1 - self.pos.1) as usize];
-                file.seek(SeekFrom::Start(segment.0 + self.pos.1)).unwrap();
-                file.read_exact(&mut read_buf).unwrap();
-                buf.put_slice(read_buf.as_slice());
-                buf.put_slice(b"\r\n");
-
-                self.pos.0 += 1;
-                self.pos.1 = 0;
-            } else {
-                let mut read_buf = vec![0u8; buf.remaining()];
-                file.seek(SeekFrom::Start(segment.0 + self.pos.1)).unwrap();
-                file.read_exact(&mut read_buf)
-                    .expect("read file to buffer error");
-                buf.put_slice(read_buf.as_slice());
-
-                self.pos.1 += read_buf.len() as u64;
-                break;
-            }
-        }
-
-        // end of processing
-        let end_boundary = format!("--{}--\r\n", MULTIPART_BYTERANGES_MULTIPART_BOUNDARY);
-        if self.pos.0 == self.segments.len() && !self.pos.2 && buf.remaining() >= end_boundary.len()
-        {
-            buf.put_slice(end_boundary.as_bytes());
-            self.pos.2 = true;
-        }
-        Poll::Ready(Ok(()))
-    }
-}
+use crate::{
+    DEFAULT_MIME_TYPE, MIME_TYPES, VERSION_STRING,
+    listing::directory_listing,
+    range::{MultipartByteRanges, RANGE_UNIT, Segment, coalesce, multipart_boundary, parse_ranges},
+};
 
 /// get all local network interfaces and their IP addresses
 pub fn get_all_local_ips() -> Vec<String> {
@@ -420,329 +33,321 @@ pub fn get_all_local_ips() -> Vec<String> {
     ips.into_iter().collect()
 }
 
-/// get file size bytes count. implementations should be different on different platforms.
-async fn get_size_bytes(file: &File) -> u64 {
-    file.metadata().await.unwrap().len()
+/// Response body produced by the static file service.
+pub type StaticBody = UnsyncBoxBody<Bytes, io::Error>;
+
+/// Serve a directory with GET and HEAD requests.
+#[derive(Clone, Debug)]
+pub struct StaticFiles {
+    root: PathBuf,
 }
 
-/// make public accessible for testing
-pub fn breadcrumbs(parent: &Path, root: &Path) -> String {
-    let mut cur = parent;
-    let mut dirs: Vec<OsString> = vec![];
-    while cur.starts_with(root) && !root.starts_with(cur) {
-        dirs.push(cur.file_name().unwrap().to_os_string());
-        if let Some(p) = cur.parent() {
-            cur = p;
-        } else {
-            break;
+impl StaticFiles {
+    /// Resolve and validate the serving root.
+    pub async fn new(root: impl AsRef<Path>) -> io::Result<Self> {
+        let root = fs::canonicalize(root).await?;
+        if !fs::metadata(&root).await?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                root.display().to_string(),
+            ));
         }
+        Ok(Self { root })
     }
 
-    let mut link = String::from("/");
-    let mut label = String::from("ROOT");
-    let mut items = String::new();
-    loop {
-        items += String::from(BREADCRUMBS_ITEM)
-            .replace("{{href}}", link.as_str())
-            .replace("{{label}}", label.as_str())
-            .as_str();
-        if dirs.is_empty() {
-            break;
-        }
-        let p = dirs.pop().unwrap();
-        label = p.to_str().unwrap().to_string();
-        link += label.as_str();
-        link += "/";
-    }
-    String::from(BREADCRUMBS_TEMPLATE).replace("{{items}}", items.as_str())
-}
-
-fn infallible(error: std::io::Error) -> Infallible {
-    panic!("io error: {}", error)
-}
-
-/// file service
-pub(crate) async fn file_service(
-    request: Request<Incoming>,
-) -> Result<Response<BoxBody<Bytes, Infallible>>, Infallible> {
-    let timer = SystemTime::now();
-    let path = request.uri().path();
-    let root =
-        env::var(super::conf::HOME_PATH_KEY).expect("environment variable HTTPRS_HOME not set!");
-    let root_path = PathBuf::from(root);
-    // strip the prefix of '/' because path join will get to system root if not
-    let full_path = root_path.join(decode(path).unwrap().strip_prefix("/").unwrap());
-    // debug!("requesting file path: {}", full_path.to_str().unwrap());
-    if tracing::enabled!(Level::TRACE) {
-        for hn in request.headers().keys() {
-            trace!(
-                "HEADER: {} -> {}",
-                hn,
-                request.headers().get(hn).unwrap().to_str().unwrap()
-            )
-        }
-    }
-
-    if full_path.exists() {
-        if full_path.is_dir() {
-            let html_title = full_path.to_str().unwrap();
-            let mut file_list = String::new();
-
-            let mut empty_content = EMPTY_LIST;
-            for entry in WalkDir::new(full_path.clone()).max_depth(1) {
-                let p = entry.unwrap().clone();
-
-                let r_path = p
-                    .path()
-                    .to_str()
-                    .unwrap()
-                    .strip_prefix(root_path.to_str().unwrap())
-                    .unwrap_or(p.path().to_str().unwrap());
-                // debug!("relative path (to ROOT): {}", r_path);
-                // skip current path showing
-                if full_path.starts_with(p.path()) {
-                    continue;
-                }
-                let meta = &p.metadata().unwrap();
-                let modified: DateTime<Local> = meta.modified().unwrap().into();
-                file_list += String::from(FILE_LIST_TABLE_ROW)
-                    .replace("{{href}}", r_path)
-                    .replace("{{name}}", p.file_name().to_str().unwrap())
-                    .replace("{{size}}", format!("{}", meta.len()).as_str())
-                    .replace(
-                        "{{modified}}",
-                        modified.format("%b %d %Y - %H:%M").to_string().as_str(),
-                    )
-                    .as_str();
+    /// Handle a request. Request bodies are unused by the static file service.
+    pub async fn handle<B>(&self, request: Request<B>) -> Response<StaticBody> {
+        let start = Instant::now();
+        let request = request.map(|_| ());
+        let mut response = self.respond(&request).await.unwrap_or_else(|error| {
+            let status = match error.kind() {
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => StatusCode::NOT_FOUND,
+                io::ErrorKind::PermissionDenied => StatusCode::FORBIDDEN,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            if status.is_server_error() {
+                tracing::warn!(%error, "Unable to serve file");
             }
-            if !file_list.is_empty() {
-                empty_content = "";
-            }
-            let html_body = String::from(FILE_LIST_TABLE_TEMPLATE)
-                .replace("{{file_list}}", file_list.as_str())
-                .replace("{{placeholder}}", empty_content);
-
-            let response_body = HTML_TEMPLATE
-                .replace("{{version}}", VERSION_STRING.as_str())
-                .replace(
-                    "{{header}}",
-                    breadcrumbs(full_path.as_path(), root_path.as_path()).as_str(),
-                )
-                .replace(
-                    "{{title}}",
-                    format!("File list under {}", html_title).as_str(),
-                )
-                .replace("{{body}}", html_body.as_str());
-
-            log_request(
-                &request,
-                timer.elapsed().unwrap().as_micros(),
-                StatusCode::OK,
-            );
-            Ok(Response::builder()
-                .header(header::SERVER, HEADER_SERVER_VALUE.clone())
-                .status(StatusCode::OK)
-                .body(BoxBody::new(response_body))
-                .unwrap())
-        } else {
-            // Resolve file extension to HTTP Content-Type
-            let content_type = resolve_content_type(path);
-            let decoded_path = decode(full_path.to_str().unwrap()).unwrap().to_string();
-            let file = File::open(decoded_path).await.expect("read file error");
-            let file_size = get_size_bytes(&file).await;
-
-            if file_size > RESPONSE_BODY_SIZE_LIMIT_IN_BYTES {
-                let default_range = HeaderValue::from_static(DEFAULT_REQUEST_RANGE_VALUE);
-                let range_header = request.headers().get(RANGE).unwrap_or(&default_range);
-                let mut range = Range::from(range_header);
-                range.adjust(file_size).combine_segments();
-
-                // debug only
-                if tracing::enabled!(Level::TRACE) {
-                    let ranges_display = range
-                        .segments
-                        .iter()
-                        .map(|v| match v {
-                            Segment::RemainingFrom(a) => format!("[{},E)", a),
-                            Segment::Regional(a, b) => format!("[{},{}]", a, b),
-                            Segment::RemainingSize(a) => format!("[E-{},E)", a),
-                        })
-                        .reduce(|a, b| a + "," + b.as_str())
-                        .unwrap();
-                    trace!("accessing file segments: < {} >", ranges_display);
-                }
-
-                // respond with multipart byte-ranges body parts if more than several ranges requested
-                if range.multipart() {
-                    let range_values = range.segments.clone();
-                    let byte_ranges =
-                        MultipartByteRanges::new(full_path.as_path(), content_type, &range_values);
-
-                    let body_stream = ReaderStream::new(byte_ranges);
-                    let body = BodyExt::map_err(
-                        StreamBody::new(body_stream.map_ok(Frame::data)),
-                        infallible,
-                    )
-                    .boxed();
-                    log_request(
-                        &request,
-                        timer.elapsed().unwrap().as_micros(),
-                        StatusCode::PARTIAL_CONTENT,
-                    );
-                    let response = Response::builder()
-                        .header(header::SERVER, HEADER_SERVER_VALUE.clone())
-                        .header(
-                            header::CONTENT_TYPE,
-                            MULTIPART_BYTERANGES_HEADER_VALUE.clone(),
-                        )
-                        .status(StatusCode::PARTIAL_CONTENT);
-                    Ok(response.body(body).unwrap())
-                } else {
-                    let range_value = range.segments[0].clone();
-                    let (file_segment, length, content_range) =
-                        read_segment(&full_path, &range_value).await;
-
-                    let body_stream = ReaderStream::new(file_segment);
-                    let body = BodyExt::map_err(
-                        StreamBody::new(body_stream.map_ok(Frame::data)),
-                        infallible,
-                    )
-                    .boxed();
-
-                    let status = match range.integrality() {
-                        true => StatusCode::OK,
-                        false => StatusCode::PARTIAL_CONTENT,
-                    };
-                    log_request(&request, timer.elapsed().unwrap().as_micros(), status);
-                    Ok(Response::builder()
-                        .header(header::SERVER, HEADER_SERVER_VALUE.clone())
-                        .header(header::CONTENT_TYPE, HeaderValue::from_static(content_type))
-                        .header(header::CONTENT_RANGE, content_range)
-                        .header(header::CONTENT_LENGTH, HeaderValue::from(length))
-                        .header(
-                            header::ACCEPT_RANGES,
-                            HeaderValue::from_static(DEFAULT_RANGE_UNIT),
-                        )
-                        .status(status)
-                        .body(body)
-                        .unwrap())
-                }
-            } else {
-                let body_stream = ReaderStream::new(file);
-                let body =
-                    BodyExt::map_err(StreamBody::new(body_stream.map_ok(Frame::data)), infallible)
-                        .boxed();
-
-                log_request(
-                    &request,
-                    timer.elapsed().unwrap().as_micros(),
-                    StatusCode::OK,
-                );
-                Ok(Response::builder()
-                    .header(header::SERVER, HEADER_SERVER_VALUE.clone())
-                    .header(header::CONTENT_TYPE, HeaderValue::from_static(content_type))
-                    .header(
-                        header::ACCEPT_RANGES,
-                        HeaderValue::from_static(DEFAULT_RANGE_UNIT),
-                    )
-                    .header(header::CONTENT_LENGTH, HeaderValue::from(file_size))
-                    .status(StatusCode::OK)
-                    .body(body)
-                    .unwrap())
-            }
+            text_response(status)
+        });
+        if request.method() == Method::HEAD {
+            *response.body_mut() = empty_body();
         }
-    } else {
-        let response_body = HTML_TEMPLATE
-            .replace("{{version}}", VERSION_STRING.as_str())
-            .replace("{{header}}", "")
-            .replace("{{title}}", "file not found")
-            .replace("{{body}}", format!("file not found: {}", path).as_str());
-
-        log_request(
-            &request,
-            timer.elapsed().unwrap().as_micros(),
-            StatusCode::NOT_FOUND,
+        response.headers_mut().insert(
+            header::SERVER,
+            HeaderValue::from_static(VERSION_STRING.as_str()),
         );
-        Ok(Response::builder()
-            .header(header::SERVER, HEADER_SERVER_VALUE.clone())
-            .status(StatusCode::NOT_FOUND)
-            .body(response_body.boxed())
-            .unwrap())
+        debug!(method = %request.method(), uri = %request.uri(), status = %response.status(), elapsed_us = start.elapsed().as_micros(), "Static file request");
+        response
+    }
+
+    async fn respond(&self, request: &Request<()>) -> io::Result<Response<StaticBody>> {
+        match *request.method() {
+            Method::OPTIONS => {
+                return Ok(Response::builder()
+                    .status(StatusCode::NO_CONTENT)
+                    .header(header::ALLOW, "GET, HEAD, OPTIONS")
+                    .body(empty_body())
+                    .unwrap());
+            }
+            Method::GET | Method::HEAD => {}
+            Method::POST
+            | Method::PUT
+            | Method::DELETE
+            | Method::PATCH
+            | Method::CONNECT
+            | Method::TRACE => {
+                let mut response = text_response(StatusCode::METHOD_NOT_ALLOWED);
+                response.headers_mut().insert(
+                    header::ALLOW,
+                    HeaderValue::from_static("GET, HEAD, OPTIONS"),
+                );
+                return Ok(response);
+            }
+            _ => return Ok(text_response(StatusCode::NOT_IMPLEMENTED)),
+        }
+
+        let Some(relative) = relative_path(request.uri().path()) else {
+            return Ok(text_response(StatusCode::BAD_REQUEST));
+        };
+        let path = fs::canonicalize(self.root.join(&relative)).await?;
+        if !path.starts_with(&self.root) {
+            return Ok(text_response(StatusCode::NOT_FOUND));
+        }
+        let metadata = fs::metadata(&path).await?;
+
+        if metadata.is_dir() {
+            if let Some(response) = precondition_response(request.headers(), None) {
+                return Ok(response);
+            }
+            let body = directory_listing(&path, &relative).await?;
+            return Ok(Response::builder()
+                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                .header(header::CONTENT_LENGTH, body.len())
+                .body(full_body(body))
+                .unwrap());
+        }
+        if !metadata.is_file() {
+            return Ok(text_response(StatusCode::NOT_FOUND));
+        }
+
+        let file = File::open(&path).await?;
+        let metadata = file.metadata().await?;
+        let size = metadata.len();
+        let modified = metadata.modified().ok().and_then(|time| {
+            let seconds = time
+                .min(SystemTime::now())
+                .duration_since(UNIX_EPOCH)
+                .ok()?
+                .as_secs();
+            Some(UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+        });
+        if let Some(response) = precondition_response(request.headers(), modified) {
+            return Ok(response);
+        }
+        let content_type = resolve_content_type(&relative);
+        let mut range_fields = request.headers().get_all(header::RANGE).iter();
+        let ranges = if request.method() == Method::GET
+            && !request.headers().contains_key(header::IF_RANGE)
+        {
+            range_fields
+                .next()
+                .filter(|_| range_fields.next().is_none())
+                .and_then(parse_ranges)
+        } else {
+            None
+        };
+        let mut response = file_response(
+            file,
+            content_type,
+            size,
+            ranges,
+            request.method() == Method::HEAD,
+        )
+        .await?;
+        if let Some(modified) = modified {
+            response
+                .headers_mut()
+                .insert(header::LAST_MODIFIED, modified_header(modified));
+        }
+        Ok(response)
     }
 }
 
-fn resolve_content_type(path: &str) -> &'static str {
-    let ext = Path::new(path)
-        .extension()
-        .and_then(OsStr::to_str)
-        .unwrap_or("");
-    MIME_TYPES.get(ext).unwrap_or(&DEFAULT_MIME_TYPE)
+fn modified_header(time: SystemTime) -> HeaderValue {
+    HeaderValue::from_str(&httpdate::fmt_http_date(time)).unwrap()
 }
 
-async fn read_segment(path: &Path, seg: &Segment) -> (FileSegment, u64, HeaderValue) {
-    let file = File::open(path).await.expect("read file error");
-    let file_size = get_size_bytes(&file).await;
-    let seg_start;
-    let mut seg_end = file_size - 1;
-    match seg {
-        Segment::RemainingFrom(start) => {
-            seg_start = *start;
+// The service exposes Last-Modified but does not issue entity tags. Only the
+// wildcard entity-tag preconditions can match an existing representation.
+fn precondition_response(
+    headers: &HeaderMap,
+    modified: Option<SystemTime>,
+) -> Option<Response<StaticBody>> {
+    let date_matches = |name: HeaderName, compare: fn(SystemTime, SystemTime) -> bool| {
+        let mut dates = headers.get_all(name).iter();
+        let date = dates
+            .next()
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| httpdate::parse_http_date(value).ok());
+        if dates.next().is_some() {
+            return false;
         }
-        Segment::Regional(start, end) => {
-            seg_start = *start;
-            seg_end = *end;
-        }
-        Segment::RemainingSize(size) => {
-            seg_start = file_size - size;
-        }
+        modified
+            .zip(date)
+            .is_some_and(|(modified, date)| compare(modified, date))
+    };
+    let wildcard = |name: HeaderName| {
+        let mut values = headers.get_all(name).iter();
+        values
+            .next()
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.trim() == "*")
+            && values.next().is_none()
     };
 
-    let segment_size = seg_end - seg_start + 1;
+    let failed = if headers.contains_key(header::IF_MATCH) {
+        !wildcard(header::IF_MATCH)
+    } else {
+        date_matches(header::IF_UNMODIFIED_SINCE, |modified, date| {
+            modified > date
+        })
+    };
+    if failed {
+        return Some(text_response(StatusCode::PRECONDITION_FAILED));
+    }
 
-    // println!("from: {}, to: {}, read: {}, bytes: {:?}", range_from, range_to, actual_size, buf);
-    (
-        FileSegment {
-            file: PathBuf::from(path),
-            offset: seg_start,
-            size: segment_size,
-        },
-        segment_size,
-        HeaderValue::from_str(
-            format!(
-                "{} {}-{}/{}",
-                DEFAULT_RANGE_UNIT, seg_start, seg_end, file_size
-            )
-            .as_str(),
-        )
-        .unwrap(),
-    )
+    let not_modified = if headers.contains_key(header::IF_NONE_MATCH) {
+        wildcard(header::IF_NONE_MATCH)
+    } else {
+        date_matches(header::IF_MODIFIED_SINCE, |modified, date| modified <= date)
+    };
+    not_modified.then(|| {
+        let mut response = Response::builder().status(StatusCode::NOT_MODIFIED);
+        if let Some(modified) = modified {
+            response = response.header(header::LAST_MODIFIED, modified_header(modified));
+        }
+        response.body(empty_body()).unwrap()
+    })
 }
 
-#[inline]
-fn log_request(request: &Request<Incoming>, time: u128, status_code: StatusCode) {
-    match status_code {
-        success if success.lt(&StatusCode::BAD_REQUEST) => {
-            debug!(
-                "{} {} {:?} {}µs {} {:?}",
-                request.method().to_string().blue(),
-                request.uri(),
-                request.version(),
-                time,
-                success.to_string().green(),
-                request.headers().get(header::USER_AGENT).unwrap()
-            );
-        }
-        fail if fail.ge(&StatusCode::BAD_REQUEST) => {
-            warn!(
-                "{} {} {:?} {}µs {} {:?}",
-                request.method().to_string().blue(),
-                request.uri(),
-                request.version(),
-                time,
-                fail.to_string().red(),
-                request.headers().get(header::USER_AGENT).unwrap()
-            );
-        }
-        _other => {}
+async fn file_response(
+    mut file: File,
+    content_type: &'static str,
+    size: u64,
+    ranges: Option<Vec<Segment>>,
+    head: bool,
+) -> io::Result<Response<StaticBody>> {
+    let mut response = Response::builder().header(header::ACCEPT_RANGES, RANGE_UNIT);
+
+    if let Some(segments) = ranges {
+        let mut regions = coalesce(&segments, size);
+        regions.sort_unstable_by_key(|&(_, _, index)| index);
+        let ranges: Vec<_> = regions
+            .into_iter()
+            .map(|(start, end, _)| (start, end))
+            .collect();
+
+        let body = match ranges.as_slice() {
+            [] => {
+                return Ok(response
+                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .header(header::CONTENT_RANGE, format!("bytes */{size}"))
+                    .header(header::CONTENT_LENGTH, 0)
+                    .body(empty_body())
+                    .unwrap());
+            }
+            &[(start, end)] => {
+                let length = end - start + 1;
+                file.seek(SeekFrom::Start(start)).await?;
+                response = response
+                    .header(header::CONTENT_TYPE, content_type)
+                    .header(header::CONTENT_RANGE, format!("bytes {start}-{end}/{size}"))
+                    .header(header::CONTENT_LENGTH, length);
+                stream_body(file.take(length))
+            }
+            _ => {
+                let boundary = multipart_boundary();
+                response = response.header(
+                    header::CONTENT_TYPE,
+                    format!("multipart/byteranges; boundary={boundary}"),
+                );
+                stream_body(MultipartByteRanges::new(
+                    file,
+                    content_type,
+                    &ranges,
+                    size,
+                    &boundary,
+                ))
+            }
+        };
+        return Ok(response
+            .status(StatusCode::PARTIAL_CONTENT)
+            .body(body)
+            .unwrap());
+    }
+
+    let body = if head {
+        empty_body()
+    } else {
+        stream_body(file.take(size))
     };
+    Ok(response
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, size)
+        .body(body)
+        .unwrap())
+}
+
+fn stream_body(reader: impl AsyncRead + Send + 'static) -> StaticBody {
+    StreamBody::new(ReaderStream::new(reader).map_ok(Frame::data)).boxed_unsync()
+}
+
+fn full_body(content: impl Into<Bytes>) -> StaticBody {
+    Full::new(content.into())
+        .map_err(|never| match never {})
+        .boxed_unsync()
+}
+
+fn empty_body() -> StaticBody {
+    full_body(Bytes::new())
+}
+
+pub(crate) fn text_response(status: StatusCode) -> Response<StaticBody> {
+    let message = status.canonical_reason().unwrap_or_default();
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(header::CONTENT_LENGTH, message.len())
+        .body(full_body(message))
+        .unwrap()
+}
+
+fn relative_path(path: &str) -> Option<PathBuf> {
+    let mut relative = PathBuf::new();
+    for segment in path
+        .strip_prefix('/')?
+        .split('/')
+        .filter(|part| !part.is_empty())
+    {
+        let decoded = urlencoding::decode_binary(segment.as_bytes());
+        let segment = std::str::from_utf8(&decoded).ok()?;
+        if segment.contains(['/', '\\', '\0']) {
+            return None;
+        }
+        let mut components = Path::new(segment).components();
+        match (components.next(), components.next()) {
+            (Some(Component::Normal(name)), None) => relative.push(name),
+            (Some(Component::CurDir), None) => {}
+            _ => return None,
+        }
+    }
+    Some(relative)
+}
+
+fn resolve_content_type(path: &Path) -> &'static str {
+    let extension = path.extension().and_then(OsStr::to_str).unwrap_or("");
+    MIME_TYPES
+        .get(extension.to_ascii_lowercase().as_str())
+        .unwrap_or(&DEFAULT_MIME_TYPE)
 }

@@ -1,249 +1,254 @@
-use super::{VERSION_STRING, conf::Configuration, http::file_service};
+use super::{
+    VERSION_STRING,
+    conf::Configuration,
+    http::{StaticFiles, text_response},
+};
 use colored::Colorize;
-use hyper::{server::conn::http1, service::service_fn};
-use hyper_util::rt::TokioIo;
+use hyper::{Request, StatusCode, Version, header, server::conn::http1, service::service_fn};
+use hyper_util::rt::{TokioIo, TokioTimer};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use std::{
-    error::Error,
-    io::{Error as IoError, ErrorKind},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    error::Error, future::Future, io, net::SocketAddr, path::Path, sync::Arc, time::Duration,
 };
-use tokio::{net::TcpListener, signal::ctrl_c, sync::RwLock};
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::TcpListener,
+    signal::ctrl_c,
+};
 use tokio_rustls::TlsAcceptor;
-use tokio_util::task::TaskTracker;
-use tracing::{debug, error, info};
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tracing::{debug, info};
 
-/// Simple http(s) server for static files
+/// HTTP/1.1 server for static files.
 pub struct Server {
-    listener: Option<TcpListener>,
-    /// The parsed server configuration
+    /// The parsed server configuration.
     pub configuration: Arc<Configuration>,
-    shutdown: Arc<RwLock<Shutdown>>,
-    tracker: Arc<TaskTracker>,
 }
 
 impl Server {
+    /// Initialize the server, panicking if its configuration cannot be loaded.
     pub async fn new(conf: Configuration) -> Self {
-        match conf.init().await {
-            Ok(conf) => Server {
-                listener: None,
-                configuration: Arc::new(conf),
-                shutdown: Arc::new(RwLock::new(Shutdown::new())),
-                tracker: Arc::new(TaskTracker::new()),
-            },
-            Err(err) => {
-                panic!("cannot parse parameters: {}", err);
+        Self::try_new(conf).await.expect("cannot parse parameters")
+    }
+
+    /// Load configuration without panicking on invalid input.
+    pub async fn try_new(conf: Configuration) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        Ok(Self {
+            configuration: Arc::new(conf.init().await?),
+        })
+    }
+
+    /// Bind and run the server. When configured, Ctrl+C initiates graceful shutdown.
+    pub async fn run(self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let host = self.configuration.host.as_deref().unwrap_or("0.0.0.0");
+        let port = self.configuration.port.unwrap_or(9900);
+        let listener = TcpListener::bind((host, port)).await?;
+        let graceful = self.configuration.graceful_shutdown;
+        self.serve(listener, async move {
+            if graceful {
+                ctrl_c().await
+            } else {
+                std::future::pending().await
             }
-        }
+        })
+        .await
     }
 
-    pub async fn run(mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        self.setup_logging();
-
-        let host = self.configuration.host.as_ref().unwrap();
-        let port = self.configuration.port.unwrap();
-        debug!(
-            "Serving with configuration: {}",
-            self.configuration.display()
-        );
-
-        let binding_addr = format!("{}:{}", host, port);
-        match TcpListener::bind(binding_addr.clone()).await {
-            Ok(listener) => {
-                self.listener = Some(listener);
-                self.print_server_info();
-
-                let result = if self.configuration.graceful_shutdown {
-                    self.run_with_graceful_shutdown().await
-                } else {
-                    self.run_simply(None::<Box<dyn Fn() -> bool>>).await
-                };
-                match result {
-                    Ok(_) => {}
-                    Err(e) => {
-                        error!("{}", e);
-                    }
-                }
-            }
-            Err(err) => {
-                panic!("cannot bind to address {}: {}", binding_addr, err);
-            }
-        }
-
-        Ok(())
-    }
-
-    fn setup_logging(&self) {
-        let level = if self.configuration.quiet {
-            tracing::Level::ERROR
-        } else {
-            tracing::Level::INFO
-        };
-        tracing_subscriber::fmt()
-            .with_max_level(level)
-            .with_target(false)
-            .with_ansi(true)
-            .with_level(false)
-            .init();
-    }
-
-    fn https_acceptor(&self) -> Option<TlsAcceptor> {
-        if self.configuration.secure.is_some() {
-            let conf_dup = self.configuration.clone();
-            let cert_file = conf_dup.as_ref().clone().secure.unwrap().cert;
-            let key_file = conf_dup.as_ref().clone().secure.unwrap().key;
-            let certs = CertificateDer::pem_file_iter(cert_file)
-                .unwrap()
-                .map(|cert| cert.unwrap())
-                .collect();
-            let private_key = PrivateKeyDer::from_pem_file(key_file).unwrap();
-            let config = rustls::ServerConfig::builder()
-                .with_no_client_auth()
-                .with_single_cert(certs, private_key)
-                .unwrap();
-            Some(TlsAcceptor::from(Arc::new(config)))
-        } else {
-            None
-        }
-    }
-
-    async fn run_with_graceful_shutdown(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        // with graceful shutdown
-        tokio::select! {
-            _ = ctrl_c() => {
-                info!("ctrl_c signal received, processing shutdown...");
-                self.shutdown.write().await.shutdown();
-            },
-
-            _ = self.run_simply(Some(
-                move ||{
-                    let in_shutdown = self.shutdown.try_read();
-                    in_shutdown.is_ok() && in_shutdown.unwrap().in_shutdown()
-                })) => {
-                debug!("main loop terminated");
-            },
-        }
-        self.tracker.close();
-        // TODO: add timeout to avoid waiting without a limit
-        self.tracker.wait().await;
-        info!("Shutting down processed. Bye!");
-        Ok(())
-    }
-
-    async fn run_simply(
-        &self,
-        stop_check: Option<impl Fn() -> bool>,
+    /// Serve on an existing listener until the provided shutdown future completes.
+    pub async fn serve(
+        self,
+        listener: TcpListener,
+        shutdown: impl Future<Output = io::Result<()>>,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        // without graceful shutdown
-        let acceptor = self.https_acceptor();
-        loop {
-            let (tcp, _) = self.listener.as_ref().unwrap().accept().await?;
-            let http = http1::Builder::new();
-            let acceptor = acceptor.clone();
-            let configuration = self.configuration.clone();
+        let root = self
+            .configuration
+            .home
+            .as_deref()
+            .map(Path::new)
+            .unwrap_or(Path::new("."));
+        let files = StaticFiles::new(root).await?;
+        let acceptor = self.https_acceptor()?;
+        self.print_server_info(listener.local_addr()?);
 
-            self.tracker.clone().spawn(async move {
-                let result = if configuration.secure.is_some() {
-                    let stream = acceptor.clone().unwrap().accept(tcp).await;
-                    match stream {
-                        Ok(stream) => {
-                            if let Err(err) = http
-                                .serve_connection(TokioIo::new(stream), service_fn(file_service))
-                                .await
-                            {
-                                Err(IoError::new(ErrorKind::ConnectionAborted, err.to_string()))
-                            } else {
-                                Ok(())
+        let tracker = TaskTracker::new();
+        let stopping = CancellationToken::new();
+        let aborting = CancellationToken::new();
+        let _abort_on_drop = aborting.clone().drop_guard();
+        tokio::pin!(shutdown);
+        let result = loop {
+            let incoming = tokio::select! {
+                biased;
+                result = &mut shutdown => break result,
+                incoming = listener.accept() => incoming,
+            };
+            let (tcp, _) = match incoming {
+                Ok(connection) => connection,
+                Err(error) => break Err(error),
+            };
+            let files = files.clone();
+            let acceptor = acceptor.clone();
+            let stopping = stopping.clone();
+            let aborting = aborting.clone();
+            tracker.spawn(async move {
+                let connection = async {
+                    let result = if let Some(acceptor) = acceptor {
+                        let tls = tokio::select! {
+                            _ = stopping.cancelled() => return,
+                            stream = acceptor.accept(tcp) => stream,
+                        };
+                        match tls {
+                            Ok(stream) => serve_connection(stream, files, stopping).await,
+                            Err(error) => {
+                                debug!(%error, "TLS handshake failed");
+                                return;
                             }
                         }
-                        Err(err) => {
-                            Err(IoError::new(ErrorKind::ConnectionAborted, err.to_string()))
-                        }
-                    }
-                } else {
-                    match http
-                        .serve_connection(TokioIo::new(tcp), service_fn(file_service))
-                        .await
-                    {
-                        Ok(_) => Ok(()),
-                        Err(err) => {
-                            Err(IoError::new(ErrorKind::ConnectionAborted, err.to_string()))
-                        }
+                    } else {
+                        serve_connection(tcp, files, stopping).await
+                    };
+                    if let Err(error) = result {
+                        debug!(%error, "HTTP connection failed");
                     }
                 };
-                if let Err(err) = result {
-                    error!("Error establish connection: {:?}", err);
+                tokio::select! {
+                    _ = aborting.cancelled() => {}
+                    _ = connection => {}
                 }
             });
+        };
 
-            if let Some(ref check) = stop_check {
-                if check() {
-                    debug!("stopping loop...");
-                    break Ok(());
-                }
-            }
+        drop(listener);
+        stopping.cancel();
+        tracker.close();
+        if tokio::time::timeout(Duration::from_secs(5), tracker.wait())
+            .await
+            .is_err()
+        {
+            aborting.cancel();
+            tracker.wait().await;
         }
+        Ok(result?)
     }
 
-    fn print_server_info(&self) {
+    fn https_acceptor(&self) -> Result<Option<TlsAcceptor>, Box<dyn Error + Send + Sync>> {
+        let Some(secure) = &self.configuration.secure else {
+            return Ok(None);
+        };
+        let certs = CertificateDer::pem_file_iter(&secure.cert)?.collect::<Result<_, _>>()?;
+        let private_key = PrivateKeyDer::from_pem_file(&secure.key)?;
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, private_key)?;
+        Ok(Some(TlsAcceptor::from(Arc::new(config))))
+    }
+
+    fn print_server_info(&self, address: SocketAddr) {
         let protocol = self.configuration.protocol();
-        let host = self.configuration.host.as_ref().unwrap();
-        let port = self.configuration.port.unwrap();
-        let protocol_colored = protocol.to_uppercase().green();
         info!("Server {} started.", VERSION_STRING.bright_blue());
         info!(
             "Serving {} on: {}",
-            protocol_colored,
-            format!(
-                "{}://{}:{}",
-                protocol,
-                self.listener.as_ref().unwrap().local_addr().unwrap().ip(),
-                port
-            )
-            .green()
+            protocol.to_uppercase().green(),
+            format!("{protocol}://{address}").green()
         );
 
-        info!("Service available on:");
-        if host == "0.0.0.0" {
-            // Display all available local IP addresses
-            let local_ips = super::http::get_all_local_ips();
-            for ip in local_ips {
-                info!("  -> {}", format!("{}://{}:{}", protocol, ip, port).green());
+        if address.ip().is_unspecified() && address.is_ipv4() {
+            for ip in super::http::get_all_local_ips() {
+                info!(
+                    "  -> {}",
+                    format!("{protocol}://{ip}:{}", address.port()).green()
+                );
             }
-        } else {
-            info!(
-                "  -> {}",
-                format!("{}://{}:{}", protocol, host, port).green()
-            );
         }
     }
 }
 
-struct Shutdown {
-    in_shutdown: Arc<AtomicBool>,
+fn valid_host(request: &Request<impl Sized>) -> bool {
+    if request.version() != Version::HTTP_11 {
+        return true;
+    }
+    let mut hosts = request.headers().get_all(header::HOST).iter();
+    let Some(host) = hosts.next().and_then(|host| host.to_str().ok()) else {
+        return false;
+    };
+    hosts.next().is_none()
+        && !host.contains(['@', ','])
+        && hyper::Uri::builder()
+            .authority(host)
+            .build()
+            .is_ok_and(|uri| uri.host().is_some_and(|host| !host.is_empty()))
 }
 
-impl Shutdown {
-    pub(crate) fn new() -> Self {
-        Self {
-            in_shutdown: Arc::new(AtomicBool::new(false)),
+async fn serve_connection(
+    stream: impl AsyncRead + AsyncWrite + Unpin,
+    files: StaticFiles,
+    stopping: CancellationToken,
+) -> Result<(), hyper::Error> {
+    let mut builder = http1::Builder::new();
+    builder
+        .timer(TokioTimer::new())
+        .header_read_timeout(Duration::from_secs(30));
+    let connection = builder.serve_connection(
+        TokioIo::new(stream),
+        service_fn(move |request| {
+            let files = files.clone();
+            async move {
+                let response = if valid_host(&request) {
+                    files.handle(request).await
+                } else {
+                    text_response(StatusCode::BAD_REQUEST)
+                };
+                Ok::<_, std::convert::Infallible>(response)
+            }
+        }),
+    );
+    tokio::pin!(connection);
+
+    tokio::select! {
+        result = &mut connection => result,
+        _ = stopping.cancelled() => {
+            connection.as_mut().graceful_shutdown();
+            connection.await
         }
     }
+}
 
-    /// check in shutdown state or not
-    pub(crate) fn in_shutdown(&self) -> bool {
-        self.in_shutdown.load(Ordering::SeqCst)
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    /// update the status.
-    pub(crate) fn shutdown(&mut self) {
-        if self.in_shutdown.load(Ordering::SeqCst) {
-            debug!("service is already in closing phase...");
-            return;
-        }
-        self.in_shutdown.store(true, Ordering::SeqCst);
+    #[tokio::test]
+    async fn http1_pipeline_and_graceful_shutdown() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let files = StaticFiles::new(env!("CARGO_MANIFEST_DIR")).await.unwrap();
+            let (mut client, server) = tokio::io::duplex(4096);
+            let stopping = CancellationToken::new();
+            let task = tokio::spawn(serve_connection(server, files, stopping.clone()));
+
+            client.write_all(b"HEAD /static/index.html HTTP/1.1\r\nHost: localhost\r\n\r\nGET /static/index.html HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-8\r\n\r\n").await.unwrap();
+
+            let mut response = Vec::new();
+            for _ in 0..2 {
+                loop {
+                    response.push(client.read_u8().await.unwrap());
+                    if response.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+            }
+            let response = String::from_utf8(response).unwrap();
+            let (head, get) = response.split_once("\r\n\r\n").unwrap();
+            assert!(head.starts_with("HTTP/1.1 200 OK\r\n"));
+            assert!(get.starts_with("HTTP/1.1 206 Partial Content\r\n"));
+            assert!(get.contains("content-range: bytes 0-8/"));
+
+            let mut content = [0; 9];
+            client.read_exact(&mut content).await.unwrap();
+            assert_eq!(&content, b"<!doctype");
+
+            stopping.cancel();
+            assert_eq!(client.read(&mut content).await.unwrap(), 0);
+            task.await.unwrap().unwrap();
+        }).await.unwrap();
     }
 }

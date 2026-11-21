@@ -18,9 +18,9 @@ include = ["src/**/*", "static/**/*", "Cargo.toml", "COPYRIGHT", "LICENSE", "REA
 tokio = { version = "^1.54", features = ["full"] }
 hyper = { version = "1", features = ["full"] }
 http-body-util = "0.1"
+httpdate = "1"
 hyper-util = { version = "0.1", features = ["full"] }
 
-walkdir = "2"
 clap = { version = "^4", features = ["derive", "wrap_help"] }
 colored = "^3"
 toml = "0.8"
@@ -31,7 +31,6 @@ bytes = "^1.12"
 urlencoding = "2"
 tokio-util = { version = "0.7", features = ["rt"] }
 futures-util = "0.3"
-regex = "^1.13"
 serde = { version = "1", features = ["derive"] }
 lazy_static = "1"
 chrono = "0.4"
@@ -40,6 +39,9 @@ log = "0.4"
 rustls = "0.23"
 tokio-rustls = "0.26"
 netdev = "0.35"
+
+[dev-dependencies]
+regex = "^1.13"
 
 [[bin]]
 name = "httprs"

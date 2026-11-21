@@ -1,24 +1,11 @@
-use clap::builder::ArgPredicate;
 use clap::{Args, Parser, ValueEnum};
 use serde::Deserialize;
-use std::path::PathBuf;
-use std::{env, error::Error, ffi::OsString};
-use tokio::{fs::File, io::AsyncReadExt};
-use tracing::{debug, error};
-
-/// global environment variable for serving root directory. default to current directory [.]
-pub(crate) const HOME_PATH_KEY: &str = "HTTPRS_HOME";
+use std::{error::Error, ffi::OsString};
 
 #[derive(Debug, Clone, Eq, PartialEq, Args, Deserialize)]
 pub struct Secure {
     /// enable https mode, adds an TLS layer for data transfer between server and clients
-    #[arg(
-        long,
-        action,
-        required = false,
-        requires_if(ArgPredicate::IsPresent, "cert"),
-        requires_if(ArgPredicate::IsPresent, "key")
-    )]
+    #[arg(long, requires_all = ["cert", "key"])]
     pub secure: bool,
 
     /// cert file path for server in https mode
@@ -38,9 +25,10 @@ pub enum Compression {
     Other,
 }
 
-#[derive(Debug, Clone, Parser, Deserialize)]
+#[derive(Debug, Clone, Default, Parser, Deserialize)]
 #[command(name = "httprs", author = "10fish", version = "0.2.5")]
-#[command(version, about, long_about = None, after_long_help = "./after-help.md")]
+#[command(version, about, long_about = None)]
+#[serde(default)]
 pub struct Configuration {
     /// Path of configuration file.
     #[arg(short, long)]
@@ -80,92 +68,30 @@ pub struct Configuration {
 }
 
 impl Configuration {
-    pub async fn init(self) -> Result<Self, Box<dyn Error>> {
-        if let Some(config_file) = &self.config {
-            match File::open(config_file).await {
-                Ok(mut file) => {
-                    let mut content = String::new();
-                    let _res = file.read_to_string(&mut content).await;
-                    let result = toml::from_str::<Configuration>(content.as_str());
-                    match result {
-                        // merge parameters from cmd(with higher priorities) to that from file
-                        Ok(config) => {
-                            let conf = self.merge_from(config);
-                            conf.set_env();
-                            Ok(conf)
-                        }
-                        Err(err) => {
-                            error!(
-                                "error parse from configuration file {}: {}",
-                                config_file.to_str().unwrap(),
-                                err
-                            );
-                            Err(Box::new(err))
-                        }
-                    }
-                }
-                Err(err) => {
-                    error!(
-                        "error access to configuration file {}",
-                        config_file.to_str().unwrap()
-                    );
-                    Err(Box::new(err))
-                }
-            }
+    pub async fn init(self) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        let mut configuration = if let Some(path) = &self.config {
+            let content = tokio::fs::read_to_string(path).await?;
+            self.merge_from(toml::from_str(&content)?)
         } else {
-            self.set_env();
-            Ok(self)
-        }
+            self
+        };
+        configuration.host.get_or_insert_with(|| "0.0.0.0".into());
+        configuration.port.get_or_insert(9900);
+        configuration.home.get_or_insert_with(|| ".".into());
+        Ok(configuration)
     }
 
-    fn merge_from(self, config: Configuration) -> Configuration {
-        let mut conf = config;
-        if self.host.is_some() {
-            conf.host = self.host;
-        }
-        if self.port.is_some() {
-            conf.port = self.port;
-        }
-        if self.home.is_some() {
-            conf.home = self.home;
-        }
-        conf.config = self.config;
-        conf.quiet |= self.quiet;
-        conf.secure = self.secure;
-        conf.graceful_shutdown |= self.graceful_shutdown;
-        conf
-    }
-
-    pub(crate) fn display(&self) -> String {
-        format!(
-            r###"
-        Configuration:
-            {{
-                host: {},
-                port: {},
-                config: {},
-                root: {},
-                cors: {},
-                compression: {:?},
-                graceful_shutdown: {},
-                secure: {},
-                quiet: {},
-            }}
-        "###,
-            self.host.as_ref().unwrap(),
-            self.port.as_ref().unwrap(),
-            self.config
-                .as_ref()
-                .unwrap_or(&OsString::from("-"))
-                .to_str()
-                .unwrap(),
-            self.home.as_ref().unwrap().to_str().unwrap(),
-            self.cors,
-            self.compression,
-            self.graceful_shutdown,
-            self.protocol(),
-            self.quiet
-        )
+    fn merge_from(self, mut config: Configuration) -> Configuration {
+        config.host = self.host.or(config.host);
+        config.port = self.port.or(config.port);
+        config.home = self.home.or(config.home);
+        config.config = self.config;
+        config.quiet |= self.quiet;
+        config.secure = self.secure.or(config.secure);
+        config.graceful_shutdown |= self.graceful_shutdown;
+        config.cors |= self.cors;
+        config.compression = self.compression.or(config.compression);
+        config
     }
 
     pub(crate) fn protocol(&self) -> &'static str {
@@ -174,16 +100,5 @@ impl Configuration {
         } else {
             "http"
         }
-    }
-
-    pub(crate) fn set_env(&self) {
-        let home_path = self.home.as_ref().unwrap();
-        unsafe {
-            env::set_var(HOME_PATH_KEY, PathBuf::from(&home_path).as_path());
-        }
-        debug!(
-            "Setting HTTPRS_HOME environment variable to {}",
-            home_path.to_str().unwrap()
-        );
     }
 }

@@ -6,9 +6,14 @@ use std::path::PathBuf;
 const TEST_FILE_SIZE: u64 = 2560000;
 
 #[test]
-fn should_get_local_ips() {
+fn local_ips_are_unique_ipv4_addresses() {
     let ips = get_all_local_ips();
-    assert!(!ips.is_empty());
+    let unique: std::collections::HashSet<_> = ips.iter().collect();
+    assert_eq!(unique.len(), ips.len());
+    assert!(
+        ips.iter()
+            .all(|ip| ip.parse::<std::net::Ipv4Addr>().is_ok())
+    );
 }
 
 #[test]
@@ -178,17 +183,6 @@ fn should_ranges_not_combined() {
         range, expected,
         "ranges should be combined and not overlapping"
     );
-}
-
-#[tokio::test]
-async fn bytes_stream_async_read() {
-    // let text = "this is line 1\nthis is line 2\nthis is line 3";
-    // let mut stream = BytesStream(text.as_bytes().to_vec());
-    //
-    // let mut buf = Vec::new();
-    // let actual = stream.read_to_end(&mut buf).await;
-    // assert!(actual.is_ok());
-    // assert_eq!(actual.unwrap(), text.len());
 }
 
 #[test]
