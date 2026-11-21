@@ -266,6 +266,23 @@ async fn service_instances_keep_independent_roots() {
     assert_eq!(body(second).await, "another root");
 }
 
+#[cfg(not(feature = "toml-config"))]
+#[tokio::test]
+async fn configuration_rejects_file_without_toml_support() {
+    let error = Configuration {
+        config: Some("config.toml".into()),
+        ..Configuration::default()
+    }
+    .init()
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::Unsupported
+    );
+}
+
+#[cfg(feature = "toml-config")]
 #[tokio::test]
 async fn configuration_merges_file_values_explicit_overrides_and_defaults() {
     let fixture = Fixture::new();
@@ -317,6 +334,7 @@ async fn directory_listing_formats_modified_times_in_gmt() {
     assert!(listing.contains("Sat, 01 Jan 2000 00:00:00 GMT"));
 }
 
+#[cfg(feature = "toml-config")]
 #[tokio::test]
 async fn toml_accepts_serving_root_and_tls_paths() {
     let fixture = Fixture::new();

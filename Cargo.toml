@@ -15,10 +15,11 @@ include = ["src/**/*", "static/**/*", "Cargo.toml", "tests/**/*", "CHANGELOG.md"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-default = ["cli", "tls", "local-ips"]
+default = ["cli", "tls", "toml-config"]
 cli = ["dep:clap", "dep:tracing-subscriber", "tokio/rt-multi-thread"]
 tls = ["dep:rustls", "dep:tokio-rustls"]
 local-ips = ["dep:netdev"]
+toml-config = ["dep:toml", "dep:serde"]
 compression = ["dep:async-compression"]
 
 [dependencies]
@@ -30,15 +31,15 @@ sha2 = "0.11"
 async-compression = { version = "0.4", features = ["tokio", "gzip", "zlib"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"] }
 
-clap = { version = "^4", features = ["derive", "wrap_help"], optional = true }
-toml = { version = "1", default-features = false, features = ["std", "serde", "parse"] }
+clap = { version = "^4", features = ["derive"], optional = true }
+toml = { version = "1", default-features = false, features = ["std", "serde", "parse"], optional = true }
 
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"], optional = true }
 bytes = "^1.12"
 tokio-util = { version = "0.7", features = ["io", "rt"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"], optional = true }
 
 rustls = { version = "0.23", default-features = false, features = ["prefer-post-quantum"], optional = true }
 tokio-rustls = { version = "0.26", optional = true }

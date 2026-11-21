@@ -141,3 +141,16 @@ fn should_not_set_compression_unknown() {
     assert!(result.is_err());
     assert!(result.err().unwrap().to_string().contains("unknown"));
 }
+
+#[cfg(not(feature = "toml-config"))]
+#[test]
+fn cli_reports_that_config_files_require_toml_support() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_httprs"))
+        .args(["--config", "config.toml"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("configuration files require the toml-config Cargo feature"));
+}

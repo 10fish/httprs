@@ -117,8 +117,13 @@ fn start_cli(args: &[&str]) -> ChildGuard {
 #[tokio::test]
 #[ignore = "requires a loopback TCP socket"]
 async fn cli_serves_http_over_an_ephemeral_port() {
-    let config = std::path::Path::new(ROOT).join("tests/fixtures/server.toml");
-    let mut child = start_cli(&["--cors", "--config", config.to_str().unwrap()]);
+    #[cfg(feature = "toml-config")]
+    let mut child = {
+        let config = std::path::Path::new(ROOT).join("tests/fixtures/server.toml");
+        start_cli(&["--cors", "--config", config.to_str().unwrap()])
+    };
+    #[cfg(not(feature = "toml-config"))]
+    let mut child = start_cli(&["--cors"]);
     tokio::time::timeout(TEST_TIMEOUT, async {
         let address = cli_address(&mut child).await;
         let mut stream = TcpStream::connect(address).await.unwrap();

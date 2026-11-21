@@ -1,9 +1,11 @@
 #[cfg(feature = "cli")]
 use clap::{Args, Parser, ValueEnum};
+#[cfg(feature = "toml-config")]
 use serde::{Deserialize, Deserializer};
 use std::{error::Error, ffi::OsString};
 
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "toml-config", derive(Deserialize))]
 #[cfg_attr(feature = "cli", derive(Args))]
 pub struct Secure {
     /// enable https mode, adds an TLS layer for data transfer between server and clients
@@ -12,38 +14,43 @@ pub struct Secure {
 
     /// cert file path for server in https mode
     #[cfg_attr(feature = "cli", arg(long, required = false))]
-    #[serde(deserialize_with = "deserialize_path")]
+    #[cfg_attr(feature = "toml-config", serde(deserialize_with = "deserialize_path"))]
     pub cert: OsString,
 
     /// private key file path for server in https mode
     #[cfg_attr(feature = "cli", arg(long, required = false))]
-    #[serde(deserialize_with = "deserialize_path")]
+    #[cfg_attr(feature = "toml-config", serde(deserialize_with = "deserialize_path"))]
     pub key: OsString,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Eq, PartialEq)]
+#[cfg_attr(feature = "toml-config", derive(Deserialize))]
 #[cfg_attr(feature = "cli", derive(ValueEnum))]
 #[cfg_attr(feature = "cli", clap(rename_all = "snake_case"))]
-#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "toml-config", serde(rename_all = "lowercase"))]
 pub enum Compression {
-    #[serde(alias = "Gzip")]
+    #[cfg_attr(feature = "toml-config", serde(alias = "Gzip"))]
     Gzip,
-    #[serde(alias = "Deflate")]
+    #[cfg_attr(feature = "toml-config", serde(alias = "Deflate"))]
     Deflate,
-    #[serde(alias = "Other")]
+    #[cfg_attr(feature = "toml-config", serde(alias = "Other"))]
     #[cfg_attr(feature = "cli", value(skip))]
     Other,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "toml-config", derive(Deserialize))]
 #[cfg_attr(feature = "cli", derive(Parser))]
 #[cfg_attr(feature = "cli", command(name = "httprs", author = "10fish"))]
 #[cfg_attr(feature = "cli", command(version, about, long_about = None))]
-#[serde(default)]
+#[cfg_attr(feature = "toml-config", serde(default))]
 pub struct Configuration {
     /// Path of configuration file.
     #[cfg_attr(feature = "cli", arg(short, long))]
-    #[serde(deserialize_with = "deserialize_optional_path")]
+    #[cfg_attr(
+        feature = "toml-config",
+        serde(deserialize_with = "deserialize_optional_path")
+    )]
     pub config: Option<OsString>,
 
     /// Binding IP address of server.
@@ -56,7 +63,10 @@ pub struct Configuration {
 
     /// Base directory, default to current directory where service starts.
     #[cfg_attr(feature = "cli", arg(default_value = "."))]
-    #[serde(deserialize_with = "deserialize_optional_path")]
+    #[cfg_attr(
+        feature = "toml-config",
+        serde(deserialize_with = "deserialize_optional_path")
+    )]
     pub home: Option<OsString>,
 
     /// Enable Cross-Origin Resource Sharing allowing any origin.
@@ -81,19 +91,29 @@ pub struct Configuration {
 }
 
 impl Configuration {
-    pub async fn init(self) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        let mut configuration = if let Some(path) = &self.config {
+    pub async fn init(mut self) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        #[cfg(feature = "toml-config")]
+        if let Some(path) = &self.config {
             let content = tokio::fs::read_to_string(path).await?;
-            self.merge_from(toml::from_str(&content)?)
-        } else {
-            self
-        };
-        configuration.host.get_or_insert_with(|| "0.0.0.0".into());
-        configuration.port.get_or_insert(9900);
-        configuration.home.get_or_insert_with(|| ".".into());
-        Ok(configuration)
+            self = self.merge_from(toml::from_str(&content)?);
+        }
+
+        #[cfg(not(feature = "toml-config"))]
+        if self.config.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "configuration files require the toml-config Cargo feature",
+            )
+            .into());
+        }
+
+        self.host.get_or_insert_with(|| "0.0.0.0".into());
+        self.port.get_or_insert(9900);
+        self.home.get_or_insert_with(|| ".".into());
+        Ok(self)
     }
 
+    #[cfg(feature = "toml-config")]
     fn merge_from(self, mut config: Configuration) -> Configuration {
         config.host = self.host.or(config.host);
         config.port = self.port.or(config.port);
@@ -116,6 +136,7 @@ impl Configuration {
     }
 }
 
+#[cfg(feature = "toml-config")]
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ConfigPath {
@@ -123,6 +144,7 @@ enum ConfigPath {
     Native(OsString),
 }
 
+#[cfg(feature = "toml-config")]
 impl From<ConfigPath> for OsString {
     fn from(value: ConfigPath) -> Self {
         match value {
@@ -132,10 +154,12 @@ impl From<ConfigPath> for OsString {
     }
 }
 
+#[cfg(feature = "toml-config")]
 fn deserialize_path<'de, D: Deserializer<'de>>(deserializer: D) -> Result<OsString, D::Error> {
     ConfigPath::deserialize(deserializer).map(Into::into)
 }
 
+#[cfg(feature = "toml-config")]
 fn deserialize_optional_path<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<OsString>, D::Error> {

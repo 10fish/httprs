@@ -38,7 +38,8 @@ the response body is streamed. Update served files through atomic replacement
 so active transfers keep reading a consistent file. Directory listings display
 modification times in GMT.
 
-The CLI also accepts a TOML configuration file through `--config`. Explicit
+With the default features, the CLI accepts a TOML configuration file through
+`--config`. Explicit
 command-line arguments take precedence over TOML values, followed by defaults.
 Path values are strings. Relative paths are resolved against the process's
 working directory.
@@ -91,8 +92,8 @@ cargo install httprs
 
 ### Cargo features
 
-Default builds include the command-line binary, TLS, and local IPv4 address
-discovery. Library consumers can disable those defaults in their manifest.
+Default builds include the command-line binary, TLS, and TOML configuration.
+Library consumers can disable those defaults in their manifest.
 
 ```toml
 httprs = { version = "0.2.6", default-features = false }
@@ -100,7 +101,11 @@ httprs = { version = "0.2.6", default-features = false }
 
 - `cli` enables the command-line binary and option parsing.
 - `tls` enables HTTPS. Builds without it reject HTTPS configuration.
-- `local-ips` enables local IPv4 address discovery and the `get_all_local_ips` API.
+- `toml-config` enables configuration files and Serde deserialization for
+  `Configuration`, `Secure`, and `Compression`. Builds without it reject
+  `--config` and accept ordinary CLI arguments and Rust configuration values.
+- `local-ips` enables printing each local IPv4 address when listening on
+  all IPv4 interfaces and exposes the `get_all_local_ips` API.
 - `compression` enables opt-in streaming gzip and deflate for files.
   Build with `cargo build --features compression` and run with
   `--compression gzip` or `--compression deflate`. Range requests prefer
