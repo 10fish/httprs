@@ -38,6 +38,7 @@ impl Server {
         let server = Self { configuration };
         #[cfg(not(feature = "tls"))]
         server.require_plain_http()?;
+        server.validate_compression()?;
         Ok(server)
     }
 
@@ -69,7 +70,16 @@ impl Server {
             .as_deref()
             .map(Path::new)
             .unwrap_or(Path::new("."));
-        let files = StaticFiles::new(root).await?;
+        self.validate_compression()?;
+        let files = StaticFiles::new(root)
+            .await?
+            .with_cors(self.configuration.cors);
+        #[cfg(feature = "compression")]
+        let files = if let Some(compression) = self.configuration.compression.clone() {
+            files.with_compression(compression)?
+        } else {
+            files
+        };
         #[cfg(not(feature = "tls"))]
         self.require_plain_http()?;
         #[cfg(feature = "tls")]
@@ -138,6 +148,24 @@ impl Server {
             tracker.wait().await;
         }
         Ok(result?)
+    }
+
+    fn validate_compression(&self) -> io::Result<()> {
+        if let Some(compression) = &self.configuration.compression {
+            if !cfg!(feature = "compression") {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "compression requires the compression Cargo feature",
+                ));
+            }
+            if *compression == crate::Compression::Other {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "unsupported compression coding",
+                ));
+            }
+        }
+        Ok(())
     }
 
     #[cfg(not(feature = "tls"))]
@@ -235,6 +263,23 @@ async fn serve_connection(
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[cfg(not(feature = "compression"))]
+    #[tokio::test]
+    async fn server_without_compression_rejects_compression_configuration() {
+        let result = Server::try_new(Configuration {
+            compression: Some(crate::Compression::Gzip),
+            ..Configuration::default()
+        })
+        .await;
+        let error = result
+            .err()
+            .expect("compression configuration must be rejected");
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::Unsupported
+        );
+    }
 
     #[cfg(not(feature = "tls"))]
     #[tokio::test]

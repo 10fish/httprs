@@ -1,6 +1,6 @@
 #[cfg(feature = "cli")]
 use clap::{Args, Parser, ValueEnum};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::{error::Error, ffi::OsString};
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
@@ -12,33 +12,38 @@ pub struct Secure {
 
     /// cert file path for server in https mode
     #[cfg_attr(feature = "cli", arg(long, required = false))]
+    #[serde(deserialize_with = "deserialize_path")]
     pub cert: OsString,
 
     /// private key file path for server in https mode
     #[cfg_attr(feature = "cli", arg(long, required = false))]
+    #[serde(deserialize_with = "deserialize_path")]
     pub key: OsString,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
 #[cfg_attr(feature = "cli", derive(ValueEnum))]
 #[cfg_attr(feature = "cli", clap(rename_all = "snake_case"))]
+#[serde(rename_all = "lowercase")]
 pub enum Compression {
+    #[serde(alias = "Gzip")]
     Gzip,
+    #[serde(alias = "Deflate")]
     Deflate,
+    #[serde(alias = "Other")]
+    #[cfg_attr(feature = "cli", value(skip))]
     Other,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[cfg_attr(feature = "cli", derive(Parser))]
-#[cfg_attr(
-    feature = "cli",
-    command(name = "httprs", author = "10fish", version = "0.2.5")
-)]
+#[cfg_attr(feature = "cli", command(name = "httprs", author = "10fish"))]
 #[cfg_attr(feature = "cli", command(version, about, long_about = None))]
 #[serde(default)]
 pub struct Configuration {
     /// Path of configuration file.
     #[cfg_attr(feature = "cli", arg(short, long))]
+    #[serde(deserialize_with = "deserialize_optional_path")]
     pub config: Option<OsString>,
 
     /// Binding IP address of server.
@@ -51,6 +56,7 @@ pub struct Configuration {
 
     /// Base directory, default to current directory where service starts.
     #[cfg_attr(feature = "cli", arg(default_value = "."))]
+    #[serde(deserialize_with = "deserialize_optional_path")]
     pub home: Option<OsString>,
 
     /// Enable Cross-Origin Resource Sharing allowing any origin.
@@ -108,4 +114,30 @@ impl Configuration {
             "http"
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ConfigPath {
+    String(String),
+    Native(OsString),
+}
+
+impl From<ConfigPath> for OsString {
+    fn from(value: ConfigPath) -> Self {
+        match value {
+            ConfigPath::String(path) => path.into(),
+            ConfigPath::Native(path) => path,
+        }
+    }
+}
+
+fn deserialize_path<'de, D: Deserializer<'de>>(deserializer: D) -> Result<OsString, D::Error> {
+    ConfigPath::deserialize(deserializer).map(Into::into)
+}
+
+fn deserialize_optional_path<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<OsString>, D::Error> {
+    Option::<ConfigPath>::deserialize(deserializer).map(|path| path.map(Into::into))
 }

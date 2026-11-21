@@ -311,3 +311,252 @@ async fn directory_listing_formats_modified_times_in_gmt() {
     assert!(listing.contains("Last Modified (GMT)"));
     assert!(listing.contains("Sat, 01 Jan 2000 00:00:00 GMT"));
 }
+
+#[tokio::test]
+async fn toml_accepts_serving_root_and_tls_paths() {
+    let fixture = Fixture::new();
+    let path = fixture.0.join("config.toml");
+    fs::write(
+        &path,
+        r#"
+home = "relative dir"
+port = 8123
+compression = "gzip"
+[secure]
+secure = true
+cert = "tls/server.pem"
+key = "tls/server-key.pem"
+"#,
+    )
+    .unwrap();
+    let config = Configuration {
+        config: Some(path.clone().into_os_string()),
+        ..Configuration::default()
+    }
+    .init()
+    .await
+    .unwrap();
+    assert_eq!(config.home.unwrap(), "relative dir");
+    let secure = config.secure.unwrap();
+    assert_eq!(secure.cert, "tls/server.pem");
+    assert_eq!(secure.key, "tls/server-key.pem");
+    assert_eq!(config.compression, Some(httprs::Compression::Gzip));
+    let override_config = Configuration {
+        config: Some(path.into_os_string()),
+        home: Some("override".into()),
+        port: Some(9000),
+        ..Configuration::default()
+    }
+    .init()
+    .await
+    .unwrap();
+    assert_eq!(override_config.home.unwrap(), "override");
+    assert_eq!(override_config.port, Some(9000));
+}
+
+#[tokio::test]
+async fn strong_entity_tags_control_preconditions_and_resume() {
+    let fixture = Fixture::new();
+    let service = fixture.service().await;
+    let initial = request(&service, "HEAD", "/sample.TXT", &[]).await;
+    let tag = initial.headers()[header::ETAG].to_str().unwrap();
+    assert!(tag.starts_with("\"sha256-"));
+    let weak = format!("W/{tag}");
+    let alternatives = format!("\"a,b\", {weak}");
+    let cached = request(
+        &service,
+        "GET",
+        "/sample.TXT",
+        &[("if-none-match", &alternatives), ("range", "bytes=3-")],
+    )
+    .await;
+    assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(cached.headers()[header::ETAG], tag);
+    assert!(body(cached).await.is_empty());
+
+    let failed = request(&service, "GET", "/sample.TXT", &[("if-match", &weak)]).await;
+    assert_eq!(failed.status(), StatusCode::PRECONDITION_FAILED);
+    let resumed = request(
+        &service,
+        "GET",
+        "/sample.TXT",
+        &[("if-match", tag), ("range", "bytes=3-"), ("if-range", tag)],
+    )
+    .await;
+    assert_eq!(resumed.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(resumed.headers()[header::ETAG], tag);
+    assert_eq!(body(resumed).await, "3456789");
+
+    let full = request(
+        &service,
+        "GET",
+        "/sample.TXT",
+        &[("range", "bytes=3-"), ("if-range", &weak)],
+    )
+    .await;
+    assert_eq!(full.status(), StatusCode::OK);
+
+    let path = fixture.0.join("sample.TXT");
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    fs::write(&path, b"9876543210").unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    let changed = request(
+        &service,
+        "GET",
+        "/sample.TXT",
+        &[("range", "bytes=3-"), ("if-range", tag)],
+    )
+    .await;
+    assert_eq!(changed.status(), StatusCode::OK);
+    assert_ne!(changed.headers()[header::ETAG], tag);
+    assert_eq!(body(changed).await, "9876543210");
+}
+
+#[tokio::test]
+async fn cors_is_opt_in_and_handles_preflight() {
+    let fixture = Fixture::new();
+    let service = fixture.service().await;
+    let headers = [
+        ("origin", "https://example.test"),
+        ("access-control-request-method", "GET"),
+        ("access-control-request-headers", "if-none-match, range"),
+    ];
+    let disabled = request(&service, "OPTIONS", "/sample.TXT", &headers).await;
+    assert!(
+        !disabled
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+    );
+
+    let service = service.with_cors(true);
+    let preflight = request(&service, "OPTIONS", "/sample.TXT", &headers).await;
+    assert_eq!(preflight.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        preflight.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+        "*"
+    );
+    assert_eq!(
+        preflight.headers()[header::ACCESS_CONTROL_ALLOW_METHODS],
+        "GET, HEAD, OPTIONS"
+    );
+    assert_eq!(
+        preflight.headers()[header::ACCESS_CONTROL_ALLOW_HEADERS],
+        "if-none-match, range"
+    );
+    assert!(
+        !preflight
+            .headers()
+            .contains_key(header::ACCESS_CONTROL_ALLOW_CREDENTIALS)
+    );
+
+    let get = request(&service, "GET", "/sample.TXT", &headers[..1]).await;
+    assert_eq!(get.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+    assert_eq!(
+        get.headers()[header::ACCESS_CONTROL_EXPOSE_HEADERS],
+        "Accept-Ranges, Content-Range, ETag"
+    );
+    let missing = request(&service, "GET", "/missing", &headers[..1]).await;
+    assert_eq!(missing.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+}
+
+#[cfg(feature = "compression")]
+#[tokio::test]
+async fn negotiates_streaming_gzip_and_deflate_without_changing_ranges() {
+    use async_compression::tokio::bufread::{GzipDecoder, ZlibDecoder};
+    use httprs::Compression;
+    use tokio::io::AsyncReadExt;
+
+    let fixture = Fixture::new();
+    for (compression, coding) in [
+        (Compression::Gzip, "gzip"),
+        (Compression::Deflate, "deflate"),
+    ] {
+        let service = fixture
+            .service()
+            .await
+            .with_compression(compression)
+            .unwrap();
+        let compressed = request(
+            &service,
+            "GET",
+            "/sample.TXT",
+            &[("accept-encoding", coding)],
+        )
+        .await;
+        assert_eq!(compressed.headers()[header::CONTENT_ENCODING], coding);
+        assert_eq!(compressed.headers()[header::VARY], "Accept-Encoding");
+        assert!(!compressed.headers().contains_key(header::CONTENT_LENGTH));
+        let tag = compressed.headers()[header::ETAG]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(tag.starts_with("W/"));
+        let compressed = body(compressed).await;
+        let mut decoded = Vec::new();
+        if coding == "gzip" {
+            GzipDecoder::new(compressed.as_ref())
+                .read_to_end(&mut decoded)
+                .await
+                .unwrap();
+        } else {
+            ZlibDecoder::new(compressed.as_ref())
+                .read_to_end(&mut decoded)
+                .await
+                .unwrap();
+        }
+        assert_eq!(decoded, b"0123456789");
+
+        let cached = request(
+            &service,
+            "GET",
+            "/sample.TXT",
+            &[("accept-encoding", coding), ("if-none-match", &tag)],
+        )
+        .await;
+        assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(cached.headers()[header::VARY], "Accept-Encoding");
+
+        let range = request(
+            &service,
+            "GET",
+            "/sample.TXT",
+            &[("accept-encoding", coding), ("range", "bytes=2-4")],
+        )
+        .await;
+        assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
+        assert!(!range.headers().contains_key(header::CONTENT_ENCODING));
+        assert_ne!(range.headers()[header::ETAG], tag);
+        assert_eq!(body(range).await, "234");
+
+        let fallback = request(
+            &service,
+            "GET",
+            "/sample.TXT",
+            &[("accept-encoding", &format!("{coding};q=0, *;q=1"))],
+        )
+        .await;
+        assert!(!fallback.headers().contains_key(header::CONTENT_ENCODING));
+        let denied = request(
+            &service,
+            "GET",
+            "/sample.TXT",
+            &[("accept-encoding", "*;q=0")],
+        )
+        .await;
+        assert_eq!(denied.status(), StatusCode::NOT_ACCEPTABLE);
+        let head = request(
+            &service,
+            "HEAD",
+            "/sample.TXT",
+            &[("accept-encoding", coding)],
+        )
+        .await;
+        assert_eq!(head.headers()[header::CONTENT_ENCODING], coding);
+        assert!(body(head).await.is_empty());
+    }
+}

@@ -7,11 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-11-21
+
 ### Added
-- Static file serving support
-- TLS support
-- Graceful shutdown improvements
-- Configuration system refactoring
+- Streaming static files and byte ranges with GET, HEAD, and conditional requests.
+- SHA-256 entity tags and strong If-Range validation for identity representations.
+- Public, credential-free CORS and optional streaming gzip and deflate.
+- Loopback HTTP, HTTPS, and shutdown tests in Linux, macOS, and Windows CI.
+
+### Changed
+- CLI, TLS, and local address discovery are independently configurable Cargo features.
+- Directory listings use GMT.
+
+### Fixed
+- TOML serving root and TLS certificate paths accept ordinary strings.
 
 ## [0.2.4] - 2024-11-03
 

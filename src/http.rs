@@ -15,10 +15,14 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 use tracing::debug;
 
+#[cfg(feature = "compression")]
+use crate::{Compression, encoding::Encoding};
+
 use crate::{
     DEFAULT_MIME_TYPE, MIME_TYPES, VERSION_STRING,
     listing::directory_listing,
     range::{MultipartByteRanges, RANGE_UNIT, Segment, coalesce, multipart_boundary, parse_ranges},
+    validators,
 };
 
 /// get all local network interfaces and their IP addresses
@@ -42,6 +46,9 @@ pub type StaticBody = UnsyncBoxBody<Bytes, io::Error>;
 #[derive(Clone, Debug)]
 pub struct StaticFiles {
     root: PathBuf,
+    cors: bool,
+    #[cfg(feature = "compression")]
+    compression: Option<Compression>,
 }
 
 impl StaticFiles {
@@ -54,7 +61,31 @@ impl StaticFiles {
                 root.display().to_string(),
             ));
         }
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            cors: false,
+            #[cfg(feature = "compression")]
+            compression: None,
+        })
+    }
+
+    /// Enable public, credential-free cross-origin access.
+    pub fn with_cors(mut self, enabled: bool) -> Self {
+        self.cors = enabled;
+        self
+    }
+
+    /// Enable streaming response compression for a supported coding.
+    #[cfg(feature = "compression")]
+    pub fn with_compression(mut self, compression: Compression) -> io::Result<Self> {
+        if compression == Compression::Other {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "unsupported compression coding",
+            ));
+        }
+        self.compression = Some(compression);
+        Ok(self)
     }
 
     /// Handle a request. Request bodies are unused by the static file service.
@@ -78,6 +109,29 @@ impl StaticFiles {
         response
             .headers_mut()
             .insert(header::SERVER, HeaderValue::from_static(VERSION_STRING));
+        if self.cors {
+            let headers = response.headers_mut();
+            headers.insert(
+                header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                HeaderValue::from_static("*"),
+            );
+            headers.insert(
+                header::ACCESS_CONTROL_EXPOSE_HEADERS,
+                HeaderValue::from_static("Accept-Ranges, Content-Range, ETag"),
+            );
+            if request.method() == Method::OPTIONS {
+                headers.insert(
+                    header::ACCESS_CONTROL_ALLOW_METHODS,
+                    HeaderValue::from_static("GET, HEAD, OPTIONS"),
+                );
+                for value in request
+                    .headers()
+                    .get_all(header::ACCESS_CONTROL_REQUEST_HEADERS)
+                {
+                    headers.append(header::ACCESS_CONTROL_ALLOW_HEADERS, value.clone());
+                }
+            }
+        }
         debug!(method = %request.method(), uri = %request.uri(), status = %response.status(), elapsed_us = start.elapsed().as_micros(), "Static file request");
         response
     }
@@ -118,7 +172,7 @@ impl StaticFiles {
         let metadata = fs::metadata(&path).await?;
 
         if metadata.is_dir() {
-            if let Some(response) = precondition_response(request.headers(), None) {
+            if let Some(response) = precondition_response(request.headers(), None, None) {
                 return Ok(response);
             }
             let body = directory_listing(&path, &relative).await?;
@@ -132,7 +186,7 @@ impl StaticFiles {
             return Ok(text_response(StatusCode::NOT_FOUND));
         }
 
-        let file = File::open(&path).await?;
+        let mut file = File::open(&path).await?;
         let metadata = file.metadata().await?;
         let size = metadata.len();
         let modified = metadata.modified().ok().and_then(|time| {
@@ -143,33 +197,78 @@ impl StaticFiles {
                 .as_secs();
             Some(UNIX_EPOCH + std::time::Duration::from_secs(seconds))
         });
-        if let Some(response) = precondition_response(request.headers(), modified) {
-            return Ok(response);
-        }
-        let content_type = resolve_content_type(&relative);
-        let mut range_fields = request.headers().get_all(header::RANGE).iter();
-        let ranges = if request.method() == Method::GET
-            && !request.headers().contains_key(header::IF_RANGE)
-        {
-            range_fields
-                .next()
-                .filter(|_| range_fields.next().is_none())
-                .and_then(parse_ranges)
+        #[cfg(feature = "compression")]
+        let encoding = if let Some(compression) = &self.compression {
+            let Some(encoding) = Encoding::select(
+                compression,
+                request.headers(),
+                request.method() == Method::GET && request.headers().contains_key(header::RANGE),
+            ) else {
+                let mut response = text_response(StatusCode::NOT_ACCEPTABLE);
+                response
+                    .headers_mut()
+                    .append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+                return Ok(response);
+            };
+            encoding
         } else {
-            None
+            Encoding::Identity
         };
-        let mut response = file_response(
-            file,
-            content_type,
-            size,
-            ranges,
-            request.method() == Method::HEAD,
-        )
-        .await?;
-        if let Some(modified) = modified {
+        #[cfg(feature = "compression")]
+        let coding = (encoding != Encoding::Identity).then(|| encoding.name());
+        #[cfg(not(feature = "compression"))]
+        let coding = None;
+
+        let tag = validators::file_tag(&mut file, &metadata, coding).await?;
+        let mut response = if let Some(response) =
+            precondition_response(request.headers(), modified, Some(&tag))
+        {
+            response
+        } else {
+            let content_type = resolve_content_type(&relative);
+            let head = request.method() == Method::HEAD;
+            #[cfg(feature = "compression")]
+            if let Some(coding) = coding {
+                let body = if head {
+                    empty_body()
+                } else {
+                    encoding.encode(file.take(size))
+                };
+                let mut response = Response::builder()
+                    .header(header::CONTENT_TYPE, content_type)
+                    .header(header::CONTENT_ENCODING, coding)
+                    .body(body)
+                    .unwrap();
+                set_file_headers(&mut response, tag, modified);
+                response
+                    .headers_mut()
+                    .append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+                return Ok(response);
+            }
+
+            let mut range_fields = request.headers().get_all(header::RANGE).iter();
+            let mut if_range = request.headers().get_all(header::IF_RANGE).iter();
+            let range_matches = if_range.next().is_none_or(|value| {
+                value.as_bytes().trim_ascii() == tag.as_bytes() && if_range.next().is_none()
+            });
+            let ranges = if !head && range_matches {
+                range_fields
+                    .next()
+                    .filter(|_| range_fields.next().is_none())
+                    .and_then(parse_ranges)
+            } else {
+                None
+            };
+            file_response(file, content_type, size, ranges, head).await?
+        };
+        if response.status() != StatusCode::PRECONDITION_FAILED {
+            set_file_headers(&mut response, tag, modified);
+        }
+        #[cfg(feature = "compression")]
+        if self.compression.is_some() {
             response
                 .headers_mut()
-                .insert(header::LAST_MODIFIED, modified_header(modified));
+                .append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
         }
         Ok(response)
     }
@@ -179,11 +278,22 @@ fn modified_header(time: SystemTime) -> HeaderValue {
     HeaderValue::from_str(&httpdate::fmt_http_date(time)).unwrap()
 }
 
-// The service exposes Last-Modified but does not issue entity tags. Only the
-// wildcard entity-tag preconditions can match an existing representation.
+fn set_file_headers(
+    response: &mut Response<StaticBody>,
+    tag: HeaderValue,
+    modified: Option<SystemTime>,
+) {
+    let headers = response.headers_mut();
+    headers.insert(header::ETAG, tag);
+    if let Some(modified) = modified {
+        headers.insert(header::LAST_MODIFIED, modified_header(modified));
+    }
+}
+
 fn precondition_response(
     headers: &HeaderMap,
     modified: Option<SystemTime>,
+    tag: Option<&HeaderValue>,
 ) -> Option<Response<StaticBody>> {
     let date_matches = |name: HeaderName, compare: fn(SystemTime, SystemTime) -> bool| {
         let mut dates = headers.get_all(name).iter();
@@ -198,17 +308,8 @@ fn precondition_response(
             .zip(date)
             .is_some_and(|(modified, date)| compare(modified, date))
     };
-    let wildcard = |name: HeaderName| {
-        let mut values = headers.get_all(name).iter();
-        values
-            .next()
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.trim() == "*")
-            && values.next().is_none()
-    };
-
     let failed = if headers.contains_key(header::IF_MATCH) {
-        !wildcard(header::IF_MATCH)
+        !validators::matches(headers, header::IF_MATCH, tag, false)
     } else {
         date_matches(header::IF_UNMODIFIED_SINCE, |modified, date| {
             modified > date
@@ -219,16 +320,15 @@ fn precondition_response(
     }
 
     let not_modified = if headers.contains_key(header::IF_NONE_MATCH) {
-        wildcard(header::IF_NONE_MATCH)
+        validators::matches(headers, header::IF_NONE_MATCH, tag, true)
     } else {
         date_matches(header::IF_MODIFIED_SINCE, |modified, date| modified <= date)
     };
     not_modified.then(|| {
-        let mut response = Response::builder().status(StatusCode::NOT_MODIFIED);
-        if let Some(modified) = modified {
-            response = response.header(header::LAST_MODIFIED, modified_header(modified));
-        }
-        response.body(empty_body()).unwrap()
+        Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .body(empty_body())
+            .unwrap()
     })
 }
 
@@ -300,7 +400,7 @@ async fn file_response(
         .unwrap())
 }
 
-fn stream_body(reader: impl AsyncRead + Send + 'static) -> StaticBody {
+pub(crate) fn stream_body(reader: impl AsyncRead + Send + 'static) -> StaticBody {
     StreamBody::new(ReaderStream::new(reader).map_ok(Frame::data)).boxed_unsync()
 }
 

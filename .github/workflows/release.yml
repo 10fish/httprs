@@ -9,26 +9,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  create-release:
-    name: Create Release
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Create Release
-        id: create_release
-        uses: softprops/action-gh-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          name: Release ${{ github.ref }}
-          draft: false
-          prerelease: false
-          
   build-release:
-    name: Build Release
-    needs: create-release
+    name: Build and test release
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -36,37 +18,61 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             name: linux-x86_64
+            binary: httprs
           - os: macos-latest
             target: x86_64-apple-darwin
             name: darwin-x86_64
+            binary: httprs
           - os: macos-latest
             target: aarch64-apple-darwin
             name: darwin-aarch64
-            
+            binary: httprs
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x86_64
+            binary: httprs.exe
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-          
+
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2.7.2
-        
+
+      - name: Test
+        run: cargo test --all-features --all-targets -- --include-ignored
+
       - name: Build target
-        run: cargo build --release --target ${{ matrix.target }}
-        
-      - name: Prepare artifacts
+        run: cargo build --release --target ${{ matrix.target }} --features compression
+
+      - name: Prepare artifact
         shell: bash
-        run: |
-          cd target/${{ matrix.target }}/release
-          tar czvf ../../../httprs-${{ matrix.name }}.tar.gz httprs
-          cd -
-          
-      - name: Upload artifacts
-        uses: softprops/action-gh-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: tar -czf httprs-${{ matrix.name }}.tar.gz -C target/${{ matrix.target }}/release ${{ matrix.binary }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: httprs-${{ matrix.name }}.tar.gz
+          name: httprs-${{ matrix.name }}
+          path: httprs-${{ matrix.name }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v1
+        with:
+          files: dist/*.tar.gz
+          fail_on_unmatched_files: true
+          generate_release_notes: true

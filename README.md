@@ -28,13 +28,32 @@ the main features are as followings, and certainly more will be added:
 `httprs` serves files and directory listings over HTTP/1.1, with optional TLS.
 It supports `GET`, `HEAD`, `OPTIONS`, full file streaming, and single or multipart
 byte ranges for files of any size. Unsatisfiable ranges return `416` with the
-representation size. File responses expose `Last-Modified` and support date
-preconditions. The server uses the full representation for `If-Range` requests
-because it has no strong validators. Directory listings display modification
-times in GMT.
+representation size. File responses expose `Last-Modified` and a SHA-256
+entity tag. Conditional requests can return `304` or `412`. An exact strong
+`If-Range` match enables a partial response. A mismatch returns the complete
+representation.
+
+Computing the entity tag reads the file once with a fixed-size buffer before
+the response body is streamed. Update served files through atomic replacement
+so active transfers keep reading a consistent file. Directory listings display
+modification times in GMT.
 
 The CLI also accepts a TOML configuration file through `--config`. Explicit
 command-line arguments take precedence over TOML values, followed by defaults.
+Path values are strings. Relative paths are resolved against the process's
+working directory.
+
+```toml
+host = "127.0.0.1"
+port = 9900
+home = "./public"
+cors = true
+
+[secure]
+secure = true
+cert = "./tls/server.pem"
+key = "./tls/server-key.pem"
+```
 
 Use `StaticFiles` to integrate file serving into an existing HTTP service.
 Initialize it once and share it across requests.
@@ -58,7 +77,9 @@ logging.
 The integration tests cover response status, headers, and body for regular,
 partial, and conditional requests. The HTTP/1.1 connection test runs over an
 in-memory duplex connection and checks pipelined responses and graceful
-shutdown. Run them with `cargo test --all-targets`.
+shutdown. Run them with `cargo test --all-features --all-targets`. On a system
+with loopback TCP access, run the CLI HTTP, TLS, and listener shutdown tests
+with `cargo test --all-features --test connections -- --ignored`.
 
 ### Installation
 Download pre-built binaries from [release](https://github.com/10fish/httprs/releases) page.
@@ -74,12 +95,17 @@ Default builds include the command-line binary, TLS, and local IPv4 address
 discovery. Library consumers can disable those defaults in their manifest.
 
 ```toml
-httprs = { version = "0.2.5", default-features = false }
+httprs = { version = "0.2.6", default-features = false }
 ```
 
 - `cli` enables the command-line binary and option parsing.
 - `tls` enables HTTPS. Builds without it reject HTTPS configuration.
 - `local-ips` enables local IPv4 address discovery and the `get_all_local_ips` API.
+- `compression` enables opt-in streaming gzip and deflate for files.
+  Build with `cargo build --features compression` and run with
+  `--compression gzip` or `--compression deflate`. Range requests prefer
+  the identity representation when the client accepts it. Compressed files
+  use separate weak entity tags.
 
 ```sh
 cargo build --release --no-default-features --features cli
@@ -93,6 +119,8 @@ httprs
 httprs -H 192.168.10.1
 # run in secure mode
 httprs --secure --key /path/to/keyfile --cert /path/to/certfile
+# allow public, credential-free cross-origin access
+httprs --cors
 # run with graceful shutdown
 httprs --graceful-shutdown
 # help for more details
@@ -121,12 +149,12 @@ httprs --help
     - [x] Linux
     - [x] Windows
 - [x] HTTPS/TLS Transmission Encryption
-- [ ] Strong validators for conditional requests and range resumption
+- [x] Strong validators for conditional requests and range resumption
     - [x] Date preconditions with `Last-Modified`
     - [x] Single and multipart byte ranges with `206` and `416`
-    - [ ] Entity tags and matching `If-Range` requests
-- [ ] CORS Support
-- [ ] Transmission Compression
+    - [x] Entity tags and matching `If-Range` requests
+- [x] CORS Support
+- [x] Transmission Compression
 - [ ] Authentication
   - [ ] Simple Basic
   - [ ] Token Based
