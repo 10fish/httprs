@@ -215,7 +215,7 @@ async fn conditional_requests_are_evaluated_before_ranges() {
 async fn directory_links_encode_file_names_and_round_trip() {
     let fixture = Fixture::new();
     fs::create_dir(fixture.0.join("A & B")).unwrap();
-    fs::write(fixture.0.join("A & B/100% literal.txt"), "ok").unwrap();
+    fs::write(fixture.0.join("A & B/100%+文件.txt"), "ok").unwrap();
     let service = fixture.service().await;
     let listing = request(&service, "GET", "/A%20%26%20B/", &[]).await;
     assert_eq!(
@@ -224,9 +224,14 @@ async fn directory_links_encode_file_names_and_round_trip() {
     );
     let listing = String::from_utf8(body(listing).await.to_vec()).unwrap();
     assert!(listing.contains("A &amp; B"));
-    let link = "/A%20%26%20B/100%25%20literal.txt";
+    let link = "/A%20%26%20B/100%25%2B%E6%96%87%E4%BB%B6.txt";
     assert!(listing.contains(&format!("href=\"{link}\"")));
     assert_eq!(body(request(&service, "GET", link, &[]).await).await, "ok");
+    let literal = "/A%20%26%20B/100%+%e6%96%87%e4%bb%b6.txt";
+    assert_eq!(
+        body(request(&service, "GET", literal, &[]).await).await,
+        "ok"
+    );
 }
 
 #[tokio::test]

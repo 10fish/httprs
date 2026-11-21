@@ -1,6 +1,5 @@
 use httprs::*;
 use hyper::header::HeaderValue;
-use regex::Regex;
 use std::path::PathBuf;
 
 const TEST_FILE_SIZE: u64 = 2560000;
@@ -39,47 +38,20 @@ fn should_generate_breadcrumbs_header() {
     }
     let expected = String::from(BREADCRUMBS_TEMPLATE).replace("{{items}}", items.as_str());
 
-    // remove all spaces to compare
-    let regex = Regex::new(r"[\s]").unwrap();
-    assert_eq!(
-        regex.replace_all(actual.as_str(), ""),
-        regex.replace_all(expected.as_str(), "")
-    );
+    assert_eq!(actual, expected);
 }
 
 #[test]
-fn should_match_range_header() {
-    let regex = Regex::new(HEADER_RANGE_VALUE_REGEX).unwrap();
-
-    let range_value1 = "bytes=1024-65335";
-    assert!(
-        regex.captures(range_value1).is_some(),
-        "regex should range value1"
-    );
-
-    let range_value2 = "bytes=-65335, 102400-";
-    assert!(
-        regex.captures(range_value2).is_some(),
-        "regex should range value2"
-    );
-
-    let range_value3 = "bytes=-65335,102400-";
-    assert!(
-        regex.captures(range_value3).is_some(),
-        "regex should range value3"
-    );
-
-    let range_value4 = "bytes=-612233";
-    assert!(
-        regex.captures(range_value4).is_some(),
-        "regex should range value4"
-    );
-
-    let range_value5 = "bytes=1024-2048, 3072-4096, 6172-102400";
-    assert!(
-        regex.captures(range_value5).is_some(),
-        "regex should range value5"
-    );
+fn parses_range_headers_with_optional_list_whitespace() {
+    for header in ["bytes=-65335, 102400-", "bytes=-65335,102400-"] {
+        assert_eq!(
+            Range::from(&HeaderValue::from_static(header)).segments,
+            [
+                Segment::RemainingSize(65335),
+                Segment::RemainingFrom(102400)
+            ]
+        );
+    }
 }
 
 #[test]

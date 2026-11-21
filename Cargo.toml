@@ -31,12 +31,11 @@ async-compression = { version = "0.4", features = ["tokio", "gzip", "zlib"], opt
 hyper-util = { version = "0.1", features = ["tokio"] }
 
 clap = { version = "^4", features = ["derive", "wrap_help"], optional = true }
-toml = "1"
+toml = { version = "1", default-features = false, features = ["std", "serde", "parse"] }
 
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"], optional = true }
 bytes = "^1.12"
-urlencoding = "2"
 tokio-util = { version = "0.7", features = ["io", "rt"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
@@ -44,9 +43,6 @@ serde = { version = "1", features = ["derive"] }
 rustls = { version = "0.23", default-features = false, features = ["prefer-post-quantum"], optional = true }
 tokio-rustls = { version = "0.26", optional = true }
 netdev = { version = "0.47", optional = true }
-
-[dev-dependencies]
-regex = "^1.13"
 
 [[bin]]
 name = "httprs"

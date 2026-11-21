@@ -1,4 +1,4 @@
-use crate::VERSION_STRING;
+use crate::{VERSION_STRING, path_encoding::push_encoded_segment};
 use std::{io, path::Path, time::UNIX_EPOCH};
 use tokio::fs;
 
@@ -53,7 +53,7 @@ pub fn breadcrumbs(parent: &Path, root: &Path) -> String {
     if let Ok(path) = parent.strip_prefix(root) {
         for piece in path.iter() {
             let label = piece.to_string_lossy();
-            link.push_str(&urlencoding::encode(&label));
+            push_encoded_segment(&mut link, &label);
             link.push('/');
             items.push_str(
                 &BREADCRUMBS_ITEM
@@ -69,7 +69,7 @@ pub(crate) async fn directory_listing(path: &Path, relative: &Path) -> io::Resul
     let mut entries = fs::read_dir(path).await?;
     let mut prefix = String::from("/");
     for component in relative.iter() {
-        prefix.push_str(&urlencoding::encode(&component.to_string_lossy()));
+        push_encoded_segment(&mut prefix, &component.to_string_lossy());
         prefix.push('/');
     }
 
@@ -82,7 +82,8 @@ pub(crate) async fn directory_listing(path: &Path, relative: &Path) -> io::Resul
         };
         let name = entry.file_name();
         let label = name.to_string_lossy();
-        let href = format!("{prefix}{}", urlencoding::encode(&label));
+        let mut href = prefix.clone();
+        push_encoded_segment(&mut href, &label);
         // HTTP dates cover Unix epoch through year 9999.
         let modified = metadata
             .modified()

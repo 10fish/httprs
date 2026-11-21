@@ -4,6 +4,7 @@ mod encoding;
 mod http;
 mod listing;
 mod mime;
+mod path_encoding;
 mod range;
 mod server;
 mod validators;

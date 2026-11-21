@@ -21,6 +21,7 @@ use crate::{Compression, encoding::Encoding};
 use crate::{
     DEFAULT_MIME_TYPE, MIME_TYPES, VERSION_STRING,
     listing::directory_listing,
+    path_encoding::decode_segment,
     range::{MultipartByteRanges, RANGE_UNIT, Segment, coalesce, multipart_boundary, parse_ranges},
     validators,
 };
@@ -431,8 +432,8 @@ fn relative_path(path: &str) -> Option<PathBuf> {
         .split('/')
         .filter(|part| !part.is_empty())
     {
-        let decoded = urlencoding::decode_binary(segment.as_bytes());
-        let segment = std::str::from_utf8(&decoded).ok()?;
+        let decoded = decode_segment(segment)?;
+        let segment = decoded.as_ref();
         if segment.contains(['/', '\\', '\0']) {
             return None;
         }

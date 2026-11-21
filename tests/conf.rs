@@ -3,7 +3,6 @@
 use clap::Parser;
 use clap::error::ErrorKind::MissingRequiredArgument;
 use httprs::{Compression, Configuration};
-use regex::Regex;
 use std::ffi::OsString;
 use std::str::FromStr;
 
@@ -51,11 +50,7 @@ fn should_complain_https_missing_key_and_cert() {
         MissingRequiredArgument
     );
     let error_string = result.as_ref().err().unwrap().to_string();
-    // Usage prompt will print full args required
-    let error_hint = Regex::new(r"Usage:.*")
-        .unwrap()
-        .replace_all(&error_string, "");
-    // println!("{}", error_hint);
+    let error_hint = error_string.split("\nUsage:").next().unwrap();
     assert!(error_hint.contains("--cert <CERT>"));
     assert!(error_hint.contains("--key <KEY>"));
 }
@@ -68,11 +63,7 @@ fn should_complain_https_missing_key() {
         MissingRequiredArgument
     );
     let error_string = result.as_ref().err().unwrap().to_string();
-    // Usage prompt will print full args required
-    let error_hint = Regex::new(r"Usage:.*")
-        .unwrap()
-        .replace_all(&error_string, "");
-    // println!("{}", error_hint);
+    let error_hint = error_string.split("\nUsage:").next().unwrap();
     assert!(!error_hint.contains("--cert <CERT>"));
     assert!(error_hint.contains("--key <KEY>"));
 }
@@ -85,11 +76,7 @@ fn should_complain_https_missing_cert() {
         MissingRequiredArgument
     );
     let error_string = result.as_ref().err().unwrap().to_string();
-    // Usage prompt will print full args required
-    let error_hint = Regex::new(r"Usage:.*")
-        .unwrap()
-        .replace_all(&error_string, "");
-    // println!("{}", error_hint);
+    let error_hint = error_string.split("\nUsage:").next().unwrap();
     assert!(error_hint.contains("--cert <CERT>"));
     assert!(!error_hint.contains("--key <KEY>"));
 }
