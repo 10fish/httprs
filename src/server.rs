@@ -3,9 +3,9 @@ use super::{
     conf::Configuration,
     http::{StaticFiles, text_response},
 };
-use colored::Colorize;
 use hyper::{Request, StatusCode, Version, header, server::conn::http1, service::service_fn};
 use hyper_util::rt::{TokioIo, TokioTimer};
+#[cfg(feature = "tls")]
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use std::{
     error::Error, future::Future, io, net::SocketAddr, path::Path, sync::Arc, time::Duration,
@@ -15,6 +15,7 @@ use tokio::{
     net::TcpListener,
     signal::ctrl_c,
 };
+#[cfg(feature = "tls")]
 use tokio_rustls::TlsAcceptor;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::{debug, info};
@@ -33,9 +34,11 @@ impl Server {
 
     /// Load configuration without panicking on invalid input.
     pub async fn try_new(conf: Configuration) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        Ok(Self {
-            configuration: Arc::new(conf.init().await?),
-        })
+        let configuration = Arc::new(conf.init().await?);
+        let server = Self { configuration };
+        #[cfg(not(feature = "tls"))]
+        server.require_plain_http()?;
+        Ok(server)
     }
 
     /// Bind and run the server. When configured, Ctrl+C initiates graceful shutdown.
@@ -67,6 +70,9 @@ impl Server {
             .map(Path::new)
             .unwrap_or(Path::new("."));
         let files = StaticFiles::new(root).await?;
+        #[cfg(not(feature = "tls"))]
+        self.require_plain_http()?;
+        #[cfg(feature = "tls")]
         let acceptor = self.https_acceptor()?;
         self.print_server_info(listener.local_addr()?);
 
@@ -86,11 +92,13 @@ impl Server {
                 Err(error) => break Err(error),
             };
             let files = files.clone();
+            #[cfg(feature = "tls")]
             let acceptor = acceptor.clone();
             let stopping = stopping.clone();
             let aborting = aborting.clone();
             tracker.spawn(async move {
                 let connection = async {
+                    #[cfg(feature = "tls")]
                     let result = if let Some(acceptor) = acceptor {
                         let tls = tokio::select! {
                             _ = stopping.cancelled() => return,
@@ -106,6 +114,8 @@ impl Server {
                     } else {
                         serve_connection(tcp, files, stopping).await
                     };
+                    #[cfg(not(feature = "tls"))]
+                    let result = serve_connection(tcp, files, stopping).await;
                     if let Err(error) = result {
                         debug!(%error, "HTTP connection failed");
                     }
@@ -130,6 +140,18 @@ impl Server {
         Ok(result?)
     }
 
+    #[cfg(not(feature = "tls"))]
+    fn require_plain_http(&self) -> io::Result<()> {
+        if self.configuration.secure.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "HTTPS requires the tls Cargo feature",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "tls")]
     fn https_acceptor(&self) -> Result<Option<TlsAcceptor>, Box<dyn Error + Send + Sync>> {
         let Some(secure) = &self.configuration.secure else {
             return Ok(None);
@@ -144,19 +166,16 @@ impl Server {
 
     fn print_server_info(&self, address: SocketAddr) {
         let protocol = self.configuration.protocol();
-        info!("Server {} started.", VERSION_STRING.bright_blue());
+        info!("Server {VERSION_STRING} started.");
         info!(
-            "Serving {} on: {}",
-            protocol.to_uppercase().green(),
-            format!("{protocol}://{address}").green()
+            "Serving {} on: {protocol}://{address}",
+            protocol.to_uppercase()
         );
 
+        #[cfg(feature = "local-ips")]
         if address.ip().is_unspecified() && address.is_ipv4() {
             for ip in super::http::get_all_local_ips() {
-                info!(
-                    "  -> {}",
-                    format!("{protocol}://{ip}:{}", address.port()).green()
-                );
+                info!("  -> {protocol}://{ip}:{}", address.port());
             }
         }
     }
@@ -216,6 +235,25 @@ async fn serve_connection(
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[cfg(not(feature = "tls"))]
+    #[tokio::test]
+    async fn server_without_tls_rejects_https_configuration() {
+        let result = Server::try_new(Configuration {
+            secure: Some(crate::conf::Secure {
+                secure: true,
+                cert: "cert.pem".into(),
+                key: "key.pem".into(),
+            }),
+            ..Configuration::default()
+        })
+        .await;
+        let error = result.err().expect("HTTPS configuration must be rejected");
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::Unsupported
+        );
+    }
 
     #[tokio::test]
     async fn http1_pipeline_and_graceful_shutdown() {

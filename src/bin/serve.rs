@@ -28,7 +28,6 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     tracing_subscriber::fmt()
         .with_max_level(level)
         .with_target(false)
-        .with_ansi(true)
         .with_level(false)
         .init();
     server.run().await

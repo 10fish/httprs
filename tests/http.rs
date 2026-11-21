@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 const TEST_FILE_SIZE: u64 = 2560000;
 
+#[cfg(feature = "local-ips")]
 #[test]
 fn local_ips_are_unique_ipv4_addresses() {
     let ips = get_all_local_ips();

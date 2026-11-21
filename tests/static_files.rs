@@ -295,3 +295,19 @@ async fn large_file_without_range_has_full_representation_metadata() {
     assert_eq!(response.headers()[header::CONTENT_LENGTH], size.to_string());
     assert!(!response.headers().contains_key(header::CONTENT_RANGE));
 }
+
+#[tokio::test]
+async fn directory_listing_formats_modified_times_in_gmt() {
+    let fixture = Fixture::new();
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(fixture.0.join("sample.TXT"))
+        .unwrap();
+    file.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(946_684_800))
+        .unwrap();
+    let service = fixture.service().await;
+    let listing = body(request(&service, "GET", "/", &[]).await).await;
+    let listing = std::str::from_utf8(&listing).unwrap();
+    assert!(listing.contains("Last Modified (GMT)"));
+    assert!(listing.contains("Sat, 01 Jan 2000 00:00:00 GMT"));
+}

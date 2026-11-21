@@ -4,6 +4,7 @@ use http_body_util::{BodyExt, Full, StreamBody, combinators::UnsyncBoxBody};
 use hyper::body::Frame;
 use hyper::header::{self, HeaderMap, HeaderName, HeaderValue};
 use hyper::{Method, Request, Response, StatusCode};
+#[cfg(feature = "local-ips")]
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::io::{self, SeekFrom};
@@ -21,6 +22,7 @@ use crate::{
 };
 
 /// get all local network interfaces and their IP addresses
+#[cfg(feature = "local-ips")]
 pub fn get_all_local_ips() -> Vec<String> {
     let mut ips = HashSet::new();
 
@@ -73,10 +75,9 @@ impl StaticFiles {
         if request.method() == Method::HEAD {
             *response.body_mut() = empty_body();
         }
-        response.headers_mut().insert(
-            header::SERVER,
-            HeaderValue::from_static(VERSION_STRING.as_str()),
-        );
+        response
+            .headers_mut()
+            .insert(header::SERVER, HeaderValue::from_static(VERSION_STRING));
         debug!(method = %request.method(), uri = %request.uri(), status = %response.status(), elapsed_us = start.elapsed().as_micros(), "Static file request");
         response
     }

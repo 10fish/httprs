@@ -1,3 +1,5 @@
+#![cfg(feature = "cli")]
+
 use clap::Parser;
 use clap::error::ErrorKind::MissingRequiredArgument;
 use httprs::{Compression, Configuration};

@@ -21,7 +21,6 @@ the main features are as followings, and certainly more will be added:
 - performant and essy to use
 - multi-platform support
 - multiple MIME support
-- colored logs
 - partial content support
 
 ### HTTP and library support
@@ -31,7 +30,8 @@ It supports `GET`, `HEAD`, `OPTIONS`, full file streaming, and single or multipa
 byte ranges for files of any size. Unsatisfiable ranges return `416` with the
 representation size. File responses expose `Last-Modified` and support date
 preconditions. The server uses the full representation for `If-Range` requests
-because it has no strong validators.
+because it has no strong validators. Directory listings display modification
+times in GMT.
 
 The CLI also accepts a TOML configuration file through `--config`. Explicit
 command-line arguments take precedence over TOML values, followed by defaults.
@@ -66,6 +66,23 @@ Download pre-built binaries from [release](https://github.com/10fish/httprs/rele
 or install with `cargo` in terminal:
 ```shell
 cargo install httprs
+```
+
+### Cargo features
+
+Default builds include the command-line binary, TLS, and local IPv4 address
+discovery. Library consumers can disable those defaults in their manifest.
+
+```toml
+httprs = { version = "0.2.5", default-features = false }
+```
+
+- `cli` enables the command-line binary and option parsing.
+- `tls` enables HTTPS. Builds without it reject HTTPS configuration.
+- `local-ips` enables local IPv4 address discovery and the `get_all_local_ips` API.
+
+```sh
+cargo build --release --no-default-features --features cli
 ```
 
 ### Usage

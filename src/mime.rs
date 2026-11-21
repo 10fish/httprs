@@ -1,10 +1,9 @@
-use lazy_static::lazy_static;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::LazyLock};
 
 pub(crate) const DEFAULT_MIME_TYPE: &str = "application/octet-stream";
 
-lazy_static! {
-    pub(crate) static ref MIME_TYPES: HashMap<&'static str, &'static str> = HashMap::from([
+pub(crate) static MIME_TYPES: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
+    HashMap::from([
         ("html", "text/html"),
         ("htm", "text/html"),
         ("shtml", "text/html"),
@@ -76,15 +75,15 @@ lazy_static! {
         ("epub", "application/epub+zip"),
         (
             "docx",
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         ),
         (
             "xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         ),
         (
             "pptx",
-            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         ),
         ("mid", "audio/midi"),
         ("midi", "audio/midi"),
@@ -108,5 +107,5 @@ lazy_static! {
         ("asf", "video/x-ms-asf"),
         ("wmv", "video/x-ms-wmv"),
         ("avi", "video/x-msvideo"),
-    ]);
-}
+    ])
+});

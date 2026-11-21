@@ -1,6 +1,5 @@
 use crate::VERSION_STRING;
-use chrono::{DateTime, Local};
-use std::{io, path::Path};
+use std::{io, path::Path, time::UNIX_EPOCH};
 use tokio::fs;
 
 const HTML_TEMPLATE: &str = include_str!("../static/index.html");
@@ -11,7 +10,7 @@ const FILE_LIST_TABLE_TEMPLATE: &str = r###"
         <tr>
             <th style="padding-right: 1em;">File Name</th>
             <th style="padding-right: 1em;">Size</th>
-            <th style="padding-right: 1em;">Last Modified</th>
+            <th style="padding-right: 1em;">Last Modified (GMT)</th>
         </tr>
     </thead>
     <tbody>
@@ -84,14 +83,15 @@ pub(crate) async fn directory_listing(path: &Path, relative: &Path) -> io::Resul
         let name = entry.file_name();
         let label = name.to_string_lossy();
         let href = format!("{prefix}{}", urlencoding::encode(&label));
+        // HTTP dates cover Unix epoch through year 9999.
         let modified = metadata
             .modified()
             .ok()
-            .map(|time| {
-                DateTime::<Local>::from(time)
-                    .format("%b %d %Y - %H:%M")
-                    .to_string()
+            .filter(|time| {
+                time.duration_since(UNIX_EPOCH)
+                    .is_ok_and(|elapsed| elapsed.as_secs() < 253_402_300_800)
             })
+            .map(httpdate::fmt_http_date)
             .unwrap_or_default();
         rows.push_str(
             &FILE_LIST_TABLE_ROW
@@ -107,7 +107,7 @@ pub(crate) async fn directory_listing(path: &Path, relative: &Path) -> io::Resul
         .replace("{{file_list}}", &rows);
     let title = format!("File list under {}", escape_html(&prefix));
     Ok(HTML_TEMPLATE
-        .replace("{{version}}", VERSION_STRING.as_str())
+        .replace("{{version}}", VERSION_STRING)
         .replace("{{title}}", &title)
         .replace("{{body}}", &table)
         .replace("{{header}}", &breadcrumbs(relative, Path::new(""))))
