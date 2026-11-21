@@ -360,7 +360,10 @@ async fn strong_entity_tags_control_preconditions_and_resume() {
     let service = fixture.service().await;
     let initial = request(&service, "HEAD", "/sample.TXT", &[]).await;
     let tag = initial.headers()[header::ETAG].to_str().unwrap();
-    assert!(tag.starts_with("\"sha256-"));
+    assert_eq!(
+        tag,
+        "\"sha256-84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882\""
+    );
     let weak = format!("W/{tag}");
     let alternatives = format!("\"a,b\", {weak}");
     let cached = request(

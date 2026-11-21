@@ -1,6 +1,7 @@
 use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use sha2::{Digest, Sha256};
 use std::{
+    fmt::Write as _,
     fs::Metadata,
     io::{self, SeekFrom},
 };
@@ -32,9 +33,13 @@ pub(crate) async fn file_tag(
     file.seek(SeekFrom::Start(0)).await?;
 
     let hash = hasher.finalize();
+    let mut hash_hex = String::with_capacity(hash.len() * 2);
+    for byte in hash.iter() {
+        write!(&mut hash_hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
     let tag = match coding {
-        Some(coding) => format!("W/\"sha256-{hash:x}-{coding}\""),
-        None => format!("\"sha256-{hash:x}\""),
+        Some(coding) => format!("W/\"sha256-{hash_hex}-{coding}\""),
+        None => format!("\"sha256-{hash_hex}\""),
     };
     Ok(HeaderValue::from_str(&tag).expect("hash and coding form a valid header"))
 }

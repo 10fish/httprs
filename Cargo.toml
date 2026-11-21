@@ -6,7 +6,7 @@ edition = "2024"
 authors = ["10fish <jokefish@live.com>"]
 license-file = "LICENSE"
 repository = "https://github.com/10fish/httprs"
-rust-version = "1.85.0"
+rust-version = "1.88.0"
 documentation = "https://docs.rs/httprs"
 readme = "README.md"
 keywords = ["http", "server", "static", "tls", "partial_content"]
@@ -26,12 +26,12 @@ tokio = { version = "^1.54", features = ["fs", "io-util", "macros", "net", "rt",
 hyper = { version = "1", features = ["http1", "server"] }
 http-body-util = "0.1"
 httpdate = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 async-compression = { version = "0.4", features = ["tokio", "gzip", "zlib"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"] }
 
 clap = { version = "^4", features = ["derive", "wrap_help"], optional = true }
-toml = "0.8"
+toml = "1"
 
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"], optional = true }
@@ -43,7 +43,7 @@ serde = { version = "1", features = ["derive"] }
 
 rustls = { version = "0.23", default-features = false, features = ["prefer-post-quantum"], optional = true }
 tokio-rustls = { version = "0.26", optional = true }
-netdev = { version = "0.35", optional = true }
+netdev = { version = "0.47", optional = true }
 
 [dev-dependencies]
 regex = "^1.13"
